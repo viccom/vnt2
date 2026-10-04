@@ -546,6 +546,23 @@ impl ServerTurnInboundHandler {
         }
         Ok(())
     }
+
+    /// 周期上报本机 P2P 直连状态（vnts2 拓扑图数据源）。
+    /// 空列表同样上报：服务端为全量覆盖语义，用于对端断开后清边。
+    pub async fn handle_p2p_report(
+        &self,
+        transport_client: &mut TransportClient,
+    ) -> anyhow::Result<()> {
+        let msg = super::p2p_report::build_p2p_status_report(
+            &self.app_state.route_table,
+            &self.app_state.nat_info,
+        );
+        let packet = super::p2p_report::p2p_report_packet(&msg)?;
+        transport_client
+            .send(packet.into_buffer().into_bytes().freeze())
+            .await?;
+        Ok(())
+    }
     pub fn handle_connected(&self) {
         self.server_info.set_server_connected(self.server_id, true);
         self.server_info

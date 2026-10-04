@@ -431,6 +431,33 @@ pub(crate) fn encode_subnet_sync_request(known_hash: &[u8]) -> BytesMut {
     .encode_bytes_mut()
 }
 
+/// 客户端上报的本机 P2P 直连状态（MsgType::P2pStatusReport 的载荷）
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct P2pStatusReportMsg {
+    pub peers: Vec<Ipv4Addr>,
+    pub nat_cone: bool,
+}
+
+impl P2pStatusReportMsg {
+    // 与 vnts2 侧镜像的解码入口（生产解码在服务器仓库）；本侧用于 roundtrip 锁定两侧定义一致
+    #[allow(dead_code)]
+    pub(crate) fn from_slice(buf: &[u8]) -> anyhow::Result<Self> {
+        let msg = proto::P2pStatusReportMsg::decode(buf)?;
+        Ok(Self {
+            peers: msg.peers.iter().map(|ip| Ipv4Addr::from(*ip)).collect(),
+            nat_cone: msg.nat_cone,
+        })
+    }
+
+    pub(crate) fn encode(&self) -> BytesMut {
+        proto::P2pStatusReportMsg {
+            peers: self.peers.iter().map(|ip| u32::from(*ip)).collect(),
+            nat_cone: self.nat_cone,
+        }
+        .encode_bytes_mut()
+    }
+}
+
 impl SubnetSyncResponse {
     pub fn from_slice(buf: &[u8]) -> anyhow::Result<Self> {
         let msg = proto::SubnetSyncResponse::decode(buf)?;

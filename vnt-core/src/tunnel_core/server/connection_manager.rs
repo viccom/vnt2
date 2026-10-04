@@ -561,6 +561,11 @@ impl ServerTurnManager {
             Duration::from_secs(10),
         );
         subnet_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut p2p_report_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(10),
+            Duration::from_secs(30),
+        );
+        p2p_report_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 Some((buf,expired)) = receiver.recv() => {
@@ -585,6 +590,9 @@ impl ServerTurnManager {
                 }
                 _ = subnet_sync_interval.tick() => {
                     data_handler.handle_subnet_sync(&mut self.transport_client).await?;
+                }
+                _ = p2p_report_interval.tick() => {
+                    data_handler.handle_p2p_report(&mut self.transport_client).await?;
                 }
                 else => {
                     bail!("receiver closed");

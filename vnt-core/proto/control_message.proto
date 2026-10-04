@@ -143,6 +143,14 @@ message SubnetSyncRequest {
   bytes known_hash = 1;
 }
 
+// Client -> server: P2P direct-connection status report (v1 ClientStatusInfo p2p_list/is_cone parity)
+message P2pStatusReportMsg {
+    // Peer virtual IPs the node currently has direct (non-relay) routes to; an empty list is still reported
+    repeated fixed32 peers = 1;
+    // Whether the local NAT is cone-shaped
+    bool nat_cone = 2;
+}
+
 message SubnetSyncResponse {
   bytes snapshot_hash = 1;
   repeated NodeSubnetRoutes nodes = 2;

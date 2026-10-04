@@ -115,6 +115,7 @@ pub enum MsgType {
     SubnetSyncRes = 24,
     Ikev2Relay = 25,
     WireGuardRelay = 26,
+    P2pStatusReport = 27,
     NodeAnnouncement = 29,
     DestinationUnreachable = 30,
     SubscriptionConfigPush = 31,
@@ -159,6 +160,7 @@ impl TryFrom<u8> for MsgType {
             24 => MsgType::SubnetSyncRes,
             25 => MsgType::Ikev2Relay,
             26 => MsgType::WireGuardRelay,
+            27 => MsgType::P2pStatusReport,
             29 => MsgType::NodeAnnouncement,
             30 => MsgType::DestinationUnreachable,
             31 => MsgType::SubscriptionConfigPush,
@@ -383,7 +385,6 @@ mod tests {
         assert!(MsgType::try_from(0u8).is_err());
         assert!(MsgType::try_from(18u8).is_err());
         assert!(MsgType::try_from(19u8).is_err());
-        assert!(MsgType::try_from(27u8).is_err());
         assert!(MsgType::try_from(28u8).is_err());
         assert!(MsgType::try_from(33u8).is_err());
     }
