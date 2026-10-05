@@ -882,6 +882,21 @@ struct HttpRouteDetail {
     metric: u8,
     rtt: u32,
     loss_rate: u16,
+    /// 连接模型：lan / udp-v4 / udp-v6 / tcp-v4 / tcp-v6 / relay（与上报口径一致）
+    mode: String,
+}
+
+impl HttpRouteDetail {
+    fn from_route(route: &vnt_core::Route) -> Self {
+        Self {
+            addr: route.route_key().to_string(),
+            protocol: route.route_key().protocol().to_string(),
+            metric: route.metric(),
+            rtt: route.rtt(),
+            loss_rate: route.loss_rate(),
+            mode: route.link_model().as_str().to_string(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -2667,11 +2682,8 @@ async fn get_peers(
 
     let build_route = |ip: &Ipv4Addr| -> Option<HttpRouteDetail> {
         api.find_route(ip).map(|route| HttpRouteDetail {
-            addr: route.route_key().to_string(),
-            protocol: route.route_key().protocol().to_string(),
-            metric: route.metric(),
-            rtt: route.rtt(),
-            loss_rate: route.loss_rate(),
+            mode: route.link_model().as_str().to_string(),
+            ..HttpRouteDetail::from_route(&route)
         })
     };
 
@@ -2827,13 +2839,7 @@ async fn get_routes(
             ip,
             routes: route_list
                 .into_iter()
-                .map(|v| HttpRouteDetail {
-                    addr: v.route_key().to_string(),
-                    protocol: v.route_key().protocol().to_string(),
-                    metric: v.metric(),
-                    rtt: v.rtt(),
-                    loss_rate: v.loss_rate(),
-                })
+                .map(|v| HttpRouteDetail::from_route(&v))
                 .collect(),
         })
         .collect();

@@ -120,24 +120,51 @@ watch(currentStatus, (newStatus) => {
   }
 });
 
-const getRouteModeClass = (route) => {
-  // 判断是否直连:metric === 1
-  const isDirect = route.metric === 1;
-  if (isDirect) {
-    return "font-medium text-green-600 dark:text-green-400";
-  } else {
-    return "text-blue-600 dark:text-blue-400";
+// 连接模型口径与 vnt-core LinkModel 一致：直连（局域网）/
+// 打洞直连(udp-v4|udp-v6|tcp-v4|tcp-v6) / 中继转发（节点链或服务器）
+const isLanAddr = (addr) => {
+  // addr 形如 "udp://192.168.1.3:5000" / "tcp://[240e::1]:5000"
+  const ip = (addr || "").split("://")[1] || "";
+  if (ip.includes(":")) {
+    if (ip === "::1") return true;
+    const first = parseInt((ip.match(/^\[?([0-9a-fA-F]+)/) || [])[1] || "0", 16);
+    return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80;
   }
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4) return false;
+  const [a, b] = parts;
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254)
+  );
 };
 
-const getRouteModeText = (route) => {
-  const isDirect = route.metric === 1;
-  const isTcp = route.protocol === "tcp";
-  if (isDirect) {
-    return isTcp ? "打洞TCP直连" : "打洞UDP直连";
-  } else {
-    return isTcp ? "客户端TCP中继" : "客户端UDP中继";
+const modelText = (peer) => {
+  const route = peer.route;
+  if (!route) return "中继转发(服务器)";
+  const mode = route.mode;
+  if (mode === "lan") return "直连";
+  if (mode === "relay") return "中继转发";
+  if (mode && mode !== "direct") return `打洞直连(${mode})`;
+  // 旧后端兜底：无 mode 字段时按 metric + addr 自行推导
+  const proto = route.protocol === "tcp" ? "tcp" : "udp";
+  const fam = (route.addr || "").includes(":") ? "v6" : "v4";
+  if (route.metric === 1) {
+    return isLanAddr(route.addr) ? "直连" : `打洞直连(${proto}-${fam})`;
   }
+  return "中继转发";
+};
+
+const modelClass = (peer) => {
+  const route = peer.route;
+  if (!route) return "text-yellow-600 dark:text-yellow-400";
+  if (route.mode === "relay" || route.metric > 1) {
+    return "text-blue-600 dark:text-blue-400";
+  }
+  return "font-medium text-green-600 dark:text-green-400";
 };
 
 const keyEqualText = (keyEqual) =>
@@ -305,10 +332,10 @@ const switcherClass = (fileName) =>
                   </div>
                 </td>
                 <td>
-                  <span v-if="peer.online && peer.route" :class="getRouteModeClass(peer.route)">{{
-                    getRouteModeText(peer.route)
+                  <span v-if="peer.online && peer.route" :class="modelClass(peer)">{{
+                    modelText(peer)
                   }}</span>
-                  <span v-else-if="peer.online" class="text-yellow-600 dark:text-yellow-400">服务器中继</span>
+                  <span v-else-if="peer.online" class="text-yellow-600 dark:text-yellow-400">中继转发(服务器)</span>
                   <span v-else class="text-slate-400">-</span>
                 </td>
                 <td class="tabular-nums">{{ peer.route ? peer.route.rtt + " ms" : "-" }}</td>
