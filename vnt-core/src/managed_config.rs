@@ -482,6 +482,7 @@ fn accept_subscription_update(
     }
     let revision = update.revision;
     let envelope = parse_envelope_config(&update);
+    log::info!("订阅配置更新到达: revision={revision}");
     config_tx.send_replace(Some(envelope));
     Some(revision)
 }

@@ -1675,6 +1675,7 @@ async fn start_vnt_network(context: StartNetworkContext) -> anyhow::Result<()> {
             match event {
                 Ok(RuntimeEvent::InstanceStopped) => break,
                 Ok(RuntimeEvent::Changed(change)) => {
+                    log::info!("收到运行期变化事件，开始应用");
                     let outcome = {
                         let mut guard = manager.lock().await;
                         guard.apply_change(&change).await
@@ -1698,8 +1699,25 @@ async fn start_vnt_network(context: StartNetworkContext) -> anyhow::Result<()> {
                                 state.set_instance_config_text(&file_name_for_wait, text);
                             }
                         }
-                        // 桌面平台的 rebuild/need_fd 均由 apply_change 内部处理
-                        Ok(ChangeOutcome::Rebuild) | Ok(ChangeOutcome::NeedFd(_)) => {}
+                        // 桌面平台的 rebuild/need_fd 均由 apply_change 内部处理；
+                        // 重建类变化同样要刷新生效配置快照，否则前端展示停留在旧值
+                        Ok(ChangeOutcome::Rebuild) | Ok(ChangeOutcome::NeedFd(_)) => {
+                            state.record_log(
+                                &file_name_for_wait,
+                                "已应用重建类运行期变化（组网实例已重建）".to_string(),
+                            );
+                            let config_text = {
+                                let mut guard = manager.lock().await;
+                                guard
+                                    .current_config()
+                                    .await
+                                    .ok()
+                                    .map(|config| config.to_toml_string())
+                            };
+                            if let Some(text) = config_text {
+                                state.set_instance_config_text(&file_name_for_wait, text);
+                            }
+                        }
                         Err(error) => {
                             log::warn!("应用运行期变化失败: {error:#}");
                             state.record_log(
