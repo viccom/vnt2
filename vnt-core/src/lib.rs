@@ -18,6 +18,9 @@ pub mod tunnel_core;
 pub mod utils;
 
 pub mod api;
+// api::find_route/route_table 等公共签名已暴露 Route/RouteTable，
+// 在 crate 根再导出使外部（vnt-web 等）可命名该类型
+pub use crate::tunnel_core::p2p::route_table::{Route, RouteTable};
 pub(crate) mod enhanced_tunnel;
 pub mod port_mapping;
 pub(crate) mod runtime_config;

@@ -143,12 +143,25 @@ message SubnetSyncRequest {
   bytes known_hash = 1;
 }
 
+// Single P2P direct-link detail
+message P2pLinkMsg {
+  // Peer virtual IP
+  fixed32 peer = 1;
+  // Link model: lan (LAN direct) / udp-v4 / udp-v6 / tcp-v4 / tcp-v6 (punched direct)
+  string model = 2;
+  // Link RTT in milliseconds
+  uint32 rtt = 3;
+}
+
 // Client -> server: P2P direct-connection status report (v1 ClientStatusInfo p2p_list/is_cone parity)
 message P2pStatusReportMsg {
     // Peer virtual IPs the node currently has direct (non-relay) routes to; an empty list is still reported
     repeated fixed32 peers = 1;
     // Whether the local NAT is cone-shaped
     bool nat_cone = 2;
+    // Direct-link details (mirrors peers). Field 3 is an additive extension:
+    // old servers skip it via prost; old clients omit it and servers fall back to peers (model treated as direct)
+    repeated P2pLinkMsg links = 3;
 }
 
 message SubnetSyncResponse {

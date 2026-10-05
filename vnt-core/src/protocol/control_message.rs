@@ -431,11 +431,24 @@ pub(crate) fn encode_subnet_sync_request(known_hash: &[u8]) -> BytesMut {
     .encode_bytes_mut()
 }
 
+/// 单条直连链路明细
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct P2pLink {
+    pub peer: Ipv4Addr,
+    /// 链路模型：lan / udp-v4 / udp-v6 / tcp-v4 / tcp-v6
+    pub model: String,
+    /// 该链路 RTT（毫秒）
+    pub rtt: u32,
+}
+
 /// 客户端上报的本机 P2P 直连状态（MsgType::P2pStatusReport 的载荷）
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct P2pStatusReportMsg {
     pub peers: Vec<Ipv4Addr>,
     pub nat_cone: bool,
+    /// 直连链路明细（与 peers 镜像）。旧服务器 prost 解码自动忽略本字段；
+    /// 旧客户端不填，服务器回退 peers（模型按 direct 处理）
+    pub links: Vec<P2pLink>,
 }
 
 impl P2pStatusReportMsg {
@@ -446,6 +459,15 @@ impl P2pStatusReportMsg {
         Ok(Self {
             peers: msg.peers.iter().map(|ip| Ipv4Addr::from(*ip)).collect(),
             nat_cone: msg.nat_cone,
+            links: msg
+                .links
+                .into_iter()
+                .map(|l| P2pLink {
+                    peer: Ipv4Addr::from(l.peer),
+                    model: l.model,
+                    rtt: l.rtt,
+                })
+                .collect(),
         })
     }
 
@@ -453,6 +475,15 @@ impl P2pStatusReportMsg {
         proto::P2pStatusReportMsg {
             peers: self.peers.iter().map(|ip| u32::from(*ip)).collect(),
             nat_cone: self.nat_cone,
+            links: self
+                .links
+                .iter()
+                .map(|l| proto::P2pLinkMsg {
+                    peer: u32::from(l.peer),
+                    model: l.model.clone(),
+                    rtt: l.rtt,
+                })
+                .collect(),
         }
         .encode_bytes_mut()
     }

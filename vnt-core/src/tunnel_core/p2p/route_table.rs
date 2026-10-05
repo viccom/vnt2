@@ -68,6 +68,23 @@ impl Route {
     pub fn is_direct(&self) -> bool {
         self.metric == 1
     }
+
+    /// 连接模型分类：metric>1 一律中继；直连按对端传输地址是否私网区分
+    /// 局域网直连与打洞直连（协议/地址族取自 RouteKey）。
+    pub fn link_model(&self) -> LinkModel {
+        if !self.is_direct() {
+            return LinkModel::Relay;
+        }
+        if is_lan_addr(self.route_key.peer_addr()) {
+            return LinkModel::Lan;
+        }
+        match self.route_key.protocol() {
+            Protocol::UDP if self.route_key.peer_addr().is_ipv4() => LinkModel::PunchUdpV4,
+            Protocol::UDP => LinkModel::PunchUdpV6,
+            Protocol::TCP if self.route_key.peer_addr().is_ipv4() => LinkModel::PunchTcpV4,
+            Protocol::TCP => LinkModel::PunchTcpV6,
+        }
+    }
     pub fn rtt(&self) -> u32 {
         self.rtt
     }
@@ -79,6 +96,53 @@ impl Route {
     }
     pub fn score(&self) -> u32 {
         self.score
+    }
+}
+
+/// P2P 链路连接模型（状态上报与前端展示的统一分类口径）
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LinkModel {
+    /// 局域网直连：对端传输地址为私网/环回/链路本地地址
+    Lan,
+    /// NAT 打洞直连
+    PunchUdpV4,
+    PunchUdpV6,
+    PunchTcpV4,
+    PunchTcpV6,
+    /// 节点链中继转发（metric > 1，对端地址为中转下一跳）
+    Relay,
+}
+
+impl LinkModel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lan => "lan",
+            Self::PunchUdpV4 => "udp-v4",
+            Self::PunchUdpV6 => "udp-v6",
+            Self::PunchTcpV4 => "tcp-v4",
+            Self::PunchTcpV6 => "tcp-v6",
+            Self::Relay => "relay",
+        }
+    }
+}
+
+/// 私网传输地址判定（直连 vs 打洞的口径）：v4 私网/环回/链路本地；
+/// v6 环回、唯一本地（fc00::/7）与链路本地（fe80::/10）。
+/// 手工位判断，避免依赖 std 仍在演进的 is_global 系列不稳定 API。
+fn is_lan_addr(addr: SocketAddr) -> bool {
+    match addr {
+        SocketAddr::V4(v4) => {
+            let ip = v4.ip();
+            ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()
+        }
+        SocketAddr::V6(v6) => {
+            let ip = v6.ip();
+            if ip.is_loopback() || ip.is_unspecified() {
+                return true;
+            }
+            let seg = ip.segments();
+            (seg[0] & 0xfe00) == 0xfc00 || (seg[0] & 0xffc0) == 0xfe80
+        }
     }
 }
 
@@ -792,6 +856,37 @@ fn direct_route_matches_policy(route: &Route, policy: PunchPolicy) -> bool {
 mod tests {
     use super::*;
     use crate::tunnel_core::p2p::node_info::{NodeInfo, NodeInfoMap};
+
+    // LinkModel 分类口径：中继 / 局域网直连（RFC1918、链路本地、v6 ULA）/ 打洞直连（协议×地址族）
+    #[test]
+    fn test_link_model_classification() {
+        let mk = |protocol, peer: &str| {
+            RouteKey::new(
+                protocol,
+                "127.0.0.1:1991".parse().unwrap(),
+                peer.parse().unwrap(),
+            )
+        };
+        let relay = Route::from(mk(Protocol::UDP, "8.8.8.8:1000"), 2, 10);
+        assert_eq!(relay.link_model(), LinkModel::Relay);
+
+        let lan_v4 = Route::from(mk(Protocol::UDP, "192.168.1.3:1000"), 1, 10);
+        assert_eq!(lan_v4.link_model(), LinkModel::Lan);
+        let lan_link_local = Route::from(mk(Protocol::TCP, "169.254.1.3:1000"), 1, 10);
+        assert_eq!(lan_link_local.link_model(), LinkModel::Lan);
+        let lan_v6_ula = Route::from(mk(Protocol::UDP, "[fd00::3]:1000"), 1, 10);
+        assert_eq!(lan_v6_ula.link_model(), LinkModel::Lan);
+
+        let punch_udp_v4 = Route::from(mk(Protocol::UDP, "183.241.98.173:1000"), 1, 10);
+        assert_eq!(punch_udp_v4.link_model(), LinkModel::PunchUdpV4);
+        let punch_tcp_v4 = Route::from(mk(Protocol::TCP, "183.241.98.173:1000"), 1, 10);
+        assert_eq!(punch_tcp_v4.link_model(), LinkModel::PunchTcpV4);
+        let punch_udp_v6 = Route::from(mk(Protocol::UDP, "[240e::3]:1000"), 1, 10);
+        assert_eq!(punch_udp_v6.link_model(), LinkModel::PunchUdpV6);
+        let punch_tcp_v6 = Route::from(mk(Protocol::TCP, "[240e::3]:1000"), 1, 10);
+        assert_eq!(punch_tcp_v6.link_model(), LinkModel::PunchTcpV6);
+        assert_eq!(punch_tcp_v6.link_model().as_str(), "tcp-v6");
+    }
 
     /// rtt 极大（>39s）时分母不能 u32 溢出（debug 构建下溢出会 panic）
     #[test]
