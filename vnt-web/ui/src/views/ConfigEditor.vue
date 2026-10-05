@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, nextTick } from "vue";
+import { computed, ref, watch, nextTick } from "vue";
 import AppModal from "../components/AppModal.vue";
 import AppSelect from "../components/AppSelect.vue";
 import ConfigHelp from "../components/ConfigHelp.vue";
@@ -29,6 +29,10 @@ const isParsingToml = ref(false);
 const formData = ref(emptyFormData());
 const subscriptionPreview = ref(null);
 const subscriptionTesting = ref(false);
+// 订阅模式下展示将要写入本地文件的完整内容：表单与订阅共享同一份
+// formData，隐藏于其他模式卡片中的字段（如组网加密密码）也会随保存
+// 序列化，必须在保存前让用户看见（浏览器自动填充曾借此静默写入密码）。
+const localSavePreview = computed(() => formToToml(formData.value));
 const certificateModeOptions = [
   { value: "skip", label: "跳过验证(默认)" },
   { value: "standard", label: "系统证书验证" },
@@ -693,7 +697,7 @@ const sectionChevronClass = (expanded) =>
                     <label class="mb-2 flex items-center text-sm font-medium text-slate-600 dark:text-slate-300">
                       组网加密密码 <ConfigHelp :help="configHelp.password" />
                     </label>
-                    <input v-model="formData.password" type="password" placeholder="留空则不加密" class="input" />
+                    <input v-model="formData.password" type="password" autocomplete="new-password" placeholder="留空则不加密" class="input" />
                   </div>
                   <div>
                     <label class="mb-2 flex items-center text-sm font-medium text-slate-600 dark:text-slate-300">
@@ -1086,6 +1090,21 @@ const sectionChevronClass = (expanded) =>
               >
                 {{ subscriptionTesting ? "测试中…" : "测试" }}
               </button>
+            </div>
+
+            <div class="mt-6 border-t border-slate-200 pt-5 dark:border-slate-700">
+              <h5 class="font-semibold text-slate-900 dark:text-white">本地将保存</h5>
+              <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
+                除订阅信息外，表单模式中已填写的字段（如组网加密密码）也会一并写入本地配置；如非有意设置，请回表单模式清空。
+              </p>
+              <textarea
+                :value="localSavePreview"
+                rows="8"
+                class="input mt-2 w-full resize-y font-mono text-xs leading-5"
+                aria-label="本地配置预览"
+                readonly
+                spellcheck="false"
+              ></textarea>
             </div>
 
             <div v-if="subscriptionPreview" class="mt-6 space-y-3 border-t border-slate-200 pt-5 dark:border-slate-700">
