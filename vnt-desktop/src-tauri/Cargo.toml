@@ -31,3 +31,9 @@ tauri-plugin-process = "2"
 [target.'cfg(windows)'.dependencies]
 runas = "1.2.0"
 windows-service.workspace = true
+
+[features]
+# tauri build（CLI）构建产物时启用 custom-protocol 使 tauri-codegen 走生产分支（内嵌前端资产）；
+# 裸 cargo 构建发布产物必须显式 --features custom-protocol，否则窗口会指向 devUrl(127.0.0.1:1420)
+# 且不内嵌 dist——Linux 交叉编译（cargo-xwin）即走此路径
+custom-protocol = ["tauri/custom-protocol"]

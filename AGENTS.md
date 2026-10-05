@@ -81,3 +81,27 @@ pnpm build:web    # 根目录执行 = pnpm --filter vnt-web-ui build
 - views：Dashboard / Config / ConfigEditor / Peers / Routes / WebAccess / About，新页面沿用现有结构与取数模式
 - 消费后端新字段时兼容旧后端：字段缺失时回退既有推断逻辑（参照 PeersView 对 `mode` 为空时按 metric + 对端地址判断）
 - 密码/令牌类输入一律 `autocomplete="new-password"`，防止浏览器密码管理器自动填充写入脏数据（曾因此把表单模式密码串进订阅配置，见 239540e）
+
+## Windows 交叉编译（Linux 宿主，cargo-xwin 路线）
+
+前置：clang + lld-link + cargo-xwin（`cargo binstall cargo-xwin`），rustup target `x86_64-pc-windows-msvc`。SDK 由 xwin 首次运行自动下载；链接期 LNK4099（缺 CRT 的 PDB）为无害噪音。
+
+```
+# ① CLI 三件套（vnt2_cli/ctrl 需 vnt-ipc，vnt2_web 需 vnt-web）
+RUSTFLAGS="-C target-feature=+crt-static" cargo xwin build \
+  --target x86_64-pc-windows-msvc --release --features vnt-ipc,vnt-web --bins
+
+# ② 桌面版四步（顺序不可换）
+pnpm --filter vnt-desktop build                       # 前端 → vnt-desktop/dist
+cargo xwin build --target x86_64-pc-windows-msvc --release --features vnt-web --bin vnt2_web
+cp target/x86_64-pc-windows-msvc/release/vnt2_web.exe \
+   vnt-desktop/src-tauri/binaries/vnt2-web-x86_64-pc-windows-msvc.exe
+cd vnt-desktop/src-tauri && \
+RUSTFLAGS="-C target-feature=+crt-static" cargo xwin build \
+  --target x86_64-pc-windows-msvc --release --features custom-protocol
+```
+
+- **custom-protocol 陷阱（2026-10-05 实测踩坑）**：tauri 以 `custom-protocol` feature 区分 dev/prod（tauri crate 的 build.rs：`dev = !custom_protocol`）。`tauri build` CLI 自动启用它；裸 cargo/xwin 构建必须显式 `--features custom-protocol`，否则程序能启动但窗口指向 devUrl（127.0.0.1:1420，vite dev server）且**不内嵌前端资产**——真机症状即"页面拒绝连接"
+- **crt-static**：消除 `VCRUNTIME140.dll`/UCRT 动态依赖，干净系统零外部运行时（wintun.dll 与前端 UI 均编译期内嵌）
+- **产物自检（无 Windows 环境时的机械验证）**：`strings vnt-desktop.exe | grep -c 'assets/index-'` 应 ≥1（前端资产已嵌入，grep 不到内容是正常的——tauri-codegen 压缩嵌入只留清单明文）；`objdump -p <exe> | grep 'DLL Name'` 不应出现 VCRUNTIME140 / api-ms-win-crt
+- 分发形态：桌面版 = `vnt-desktop.exe` + `vnt2-web.exe`（sidecar 改名后与主程序同目录）
