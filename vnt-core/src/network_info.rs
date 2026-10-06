@@ -449,6 +449,10 @@ impl RuntimeChangeManager {
         if device_applied {
             manager.notify_device_applied().await;
         }
+        // 各热应用路径（策略/服务端/网卡参数）都可能改过实例配置，
+        // 统一同步 API 配置快照；ip/input 已在 commit_runtime_snapshot
+        // 内先行写入，此处幂等
+        manager.commit_config_snapshot();
         Ok(ChangeOutcome::Applied)
     }
 

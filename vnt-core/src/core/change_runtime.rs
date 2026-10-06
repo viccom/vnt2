@@ -180,6 +180,15 @@ impl NetworkManager {
         true
     }
 
+    /// 把热应用后的实例配置同步进 API 配置快照（app_state.config）。
+    /// 该快照只在实例启动与 commit_runtime_snapshot（ip/input）时写入，
+    /// 策略/服务端地址/网卡参数等热应用路径若不统一回写，/api/info 的
+    /// fec/rtx/compress/mtu 等字段将永远显示启动值（2026-10-06 平台下发
+    /// fec=true 实测：数据面已生效而接口仍报 false，前端据此误显未启用）。
+    pub(crate) fn commit_config_snapshot(&mut self) {
+        self.app_state.set_config(self.config.clone());
+    }
+
     /// 应用一次完整运行期快照中的网络状态：虚拟 IP/网段（设备虚拟地址）、
     /// 完整入站路由（系统路由 + 转发路由表），并把配置中影响路由的字段
     /// （`ip`、`input`）提交到实例。非安卓平台使用。
