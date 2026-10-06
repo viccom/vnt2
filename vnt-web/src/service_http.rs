@@ -1697,6 +1697,18 @@ async fn start_vnt_network(context: StartNetworkContext) -> anyhow::Result<()> {
                     };
                     match outcome {
                         Ok(ChangeOutcome::Applied) => {
+                            // Windows 桌面路径 has_fd=true，重建类变更在核心
+                            // apply_change 内部完成且仍返回 Applied（见
+                            // network_info.rs apply_change_impl），缓存句柄若不
+                            // 刷新会一直指向已 Drop 的旧实例——/api/info、
+                            // /api/peers、/api/routes 全部读空。未重建时
+                            // manager.api() 返回的就是当前实例句柄，刷新幂等。
+                            if let Some(api) = {
+                                let guard = manager.lock().await;
+                                guard.api()
+                            } {
+                                state.refresh_instance_api(&file_name_for_wait, api);
+                            }
                             state.record_log(
                                 &file_name_for_wait,
                                 format!("已应用运行期变化（入栈路由 {} 条）", change.routes.len()),
