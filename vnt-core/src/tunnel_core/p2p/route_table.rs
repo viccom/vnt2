@@ -450,6 +450,27 @@ impl RouteTable {
             .collect()
     }
 
+    /// 已验证的非直连（节点中继）路由快照：每个目的取评分最高且经 Pong
+    /// 实测（is_verified）的中继路由，附物理隧道属主（中转节点）。owner
+    /// 缺失（隧道已回收）或未实测（gossip 公告学到但 rtt=DEFAULT_RTT，
+    /// 路径可能半开）的条目跳过；供 P2P 状态上报 relay_links 使用。
+    pub fn verified_relay_routes(&self) -> Vec<(Ipv4Addr, Ipv4Addr, Route)> {
+        let state = self.inner.state.read();
+        state
+            .route_table
+            .iter()
+            .filter_map(|(destination, routes)| {
+                let best = routes
+                    .iter()
+                    .filter(|route| !route.is_direct() && route.is_verified())
+                    .max_by_key(|route| route.score())?;
+                let via = state.route_key_owner.get(&best.route_key()).copied()?;
+                // owner 即目的说明数据异常（中继路由的隧道必然属于中转节点），跳过
+                (via != *destination).then_some((*destination, via, *best))
+            })
+            .collect()
+    }
+
     /// Best physical route to one direct peer. A peer can own several UDP/TCP
     /// tunnels, but a broadcast must consume only the best one.
     pub fn best_direct_route(&self, peer: Ipv4Addr) -> Option<Route> {

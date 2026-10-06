@@ -441,6 +441,17 @@ pub(crate) struct P2pLink {
     pub rtt: u32,
 }
 
+/// 单条已验证节点中继路由（gossip metric-2，两跳路径经中转节点转发）
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct P2pRelayLink {
+    /// 目的虚拟 IP（上报方对其无直连路由）
+    pub dest: Ipv4Addr,
+    /// 中转节点虚拟 IP（物理隧道属主）
+    pub via: Ipv4Addr,
+    /// 两跳路径实测 RTT（毫秒）
+    pub rtt: u32,
+}
+
 /// 客户端上报的本机 P2P 直连状态（MsgType::P2pStatusReport 的载荷）
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct P2pStatusReportMsg {
@@ -449,6 +460,9 @@ pub(crate) struct P2pStatusReportMsg {
     /// 直连链路明细（与 peers 镜像）。旧服务器 prost 解码自动忽略本字段；
     /// 旧客户端不填，服务器回退 peers（模型按 direct 处理）
     pub links: Vec<P2pLink>,
+    /// 已验证节点中继路由。字段 4 加法扩展：旧服务器跳过未知字段、
+    /// 旧客户端不填（空列表）
+    pub relay_links: Vec<P2pRelayLink>,
 }
 
 impl P2pStatusReportMsg {
@@ -468,6 +482,15 @@ impl P2pStatusReportMsg {
                     rtt: l.rtt,
                 })
                 .collect(),
+            relay_links: msg
+                .relay_links
+                .into_iter()
+                .map(|l| P2pRelayLink {
+                    dest: Ipv4Addr::from(l.dest),
+                    via: Ipv4Addr::from(l.via),
+                    rtt: l.rtt,
+                })
+                .collect(),
         })
     }
 
@@ -481,6 +504,15 @@ impl P2pStatusReportMsg {
                 .map(|l| proto::P2pLinkMsg {
                     peer: u32::from(l.peer),
                     model: l.model.clone(),
+                    rtt: l.rtt,
+                })
+                .collect(),
+            relay_links: self
+                .relay_links
+                .iter()
+                .map(|l| proto::P2pRelayLinkMsg {
+                    dest: u32::from(l.dest),
+                    via: u32::from(l.via),
                     rtt: l.rtt,
                 })
                 .collect(),

@@ -162,6 +162,19 @@ message P2pStatusReportMsg {
     // Direct-link details (mirrors peers). Field 3 is an additive extension:
     // old servers skip it via prost; old clients omit it and servers fall back to peers (model treated as direct)
     repeated P2pLinkMsg links = 3;
+    // Verified node-relayed routes (gossip metric-2). Field 4 is additive:
+    // old servers skip it via prost; old clients omit it (empty)
+    repeated P2pRelayLinkMsg relay_links = 4;
+}
+
+// Single verified node-relayed route detail
+message P2pRelayLinkMsg {
+    // Destination virtual IP (reporter has no direct route to it)
+    fixed32 dest = 1;
+    // Relay node virtual IP (owner of the physical tunnel)
+    fixed32 via = 2;
+    // End-to-end RTT of the two-hop path in milliseconds
+    uint32 rtt = 3;
 }
 
 message SubnetSyncResponse {
