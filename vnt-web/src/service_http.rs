@@ -318,6 +318,21 @@ impl HttpAppState {
         }
     }
 
+    /// 重建类变更替换了管理器内部的组网实例，实例状态里缓存的 VntApi
+    /// 句柄随之失效（仍指向旧实例），必须同步刷新，否则 /api/info 等
+    /// 接口会一直读到旧实例的配置与对端列表。
+    fn refresh_instance_api(&self, file_name: &str, api: VntApi) {
+        if let Some(handler) = self
+            .inner
+            .lock()
+            .instances
+            .get_mut(file_name)
+            .and_then(|inst| inst.vnt.as_mut())
+        {
+            handler.api = api;
+        }
+    }
+
     fn instance_task_groups(&self, file_name: &str) -> Option<TaskGroupManager> {
         self.inner
             .lock()
@@ -1699,13 +1714,39 @@ async fn start_vnt_network(context: StartNetworkContext) -> anyhow::Result<()> {
                                 state.set_instance_config_text(&file_name_for_wait, text);
                             }
                         }
-                        // 桌面平台的 rebuild/need_fd 均由 apply_change 内部处理；
-                        // 重建类变化同样要刷新生效配置快照，否则前端展示停留在旧值
+                        // unix 有网卡平台的 apply_change 不携带 fd，只报告需要
+                        // 重建（协议与 vnt-jni 的 action=rebuild 一致），必须在此
+                        // 显式调用 rebuild() 才会以新配置重建实例；Windows 路径
+                        // has_fd=true，apply_change 内部已完成重建、不会走到这里
                         Ok(ChangeOutcome::Rebuild) | Ok(ChangeOutcome::NeedFd(_)) => {
-                            state.record_log(
-                                &file_name_for_wait,
-                                "已应用重建类运行期变化（组网实例已重建）".to_string(),
-                            );
+                            let rebuild_result = {
+                                let mut guard = manager.lock().await;
+                                guard.rebuild().await
+                            };
+                            match rebuild_result {
+                                Ok(()) => {
+                                    // 重建替换了组网实例，刷新缓存的 API 句柄，
+                                    // 否则 /api/info 等接口继续读旧实例
+                                    if let Some(api) = {
+                                        let guard = manager.lock().await;
+                                        guard.api()
+                                    } {
+                                        state.refresh_instance_api(&file_name_for_wait, api);
+                                    }
+                                    state.record_log(
+                                        &file_name_for_wait,
+                                        "已应用重建类运行期变化（组网实例已重建）".to_string(),
+                                    );
+                                }
+                                Err(error) => {
+                                    log::warn!("重建组网实例失败: {error:#}");
+                                    state.record_log(
+                                        &file_name_for_wait,
+                                        format!("重建组网实例失败: {error:#}"),
+                                    );
+                                }
+                            }
+                            // 重建成败都要刷新生效配置快照，前端展示与服务端下发对齐
                             let config_text = {
                                 let mut guard = manager.lock().await;
                                 guard
