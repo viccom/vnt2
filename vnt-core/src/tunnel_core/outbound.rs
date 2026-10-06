@@ -172,13 +172,23 @@ impl BasicOutbound {
                 }
                 return Ok(false);
             }
-            if let Some(route) = selected_p2p {
+            // 未实测（rtt=DEFAULT_RTT）的 p2p 路由可能是单向半开路径：对端打洞
+            // 包能到达本端，但回程穿不过对端 NAT。这类路由让位于服务器中继，
+            // 仅当中继不可达（无服务器模式）时才承载；Ping/Pong 实测通过后
+            // 自动转正为直连
+            if let Some(route) = selected_p2p.filter(|route| route.is_verified()) {
                 p2p.send_raw_to(packet, &route.route_key()).await?;
                 return Ok(true);
             }
         }
         if self.server_outbound.exists_route(&dest) {
             self.server_outbound.send_raw(dest, packet).await?;
+            return Ok(true);
+        }
+        if let Some(route) = selected_p2p {
+            if let Some(p2p) = self.p2p_outbound.as_ref() {
+                p2p.send_raw_to(packet, &route.route_key()).await?;
+            }
             return Ok(true);
         }
         if let Some(p2p) = self.p2p_outbound.as_ref()

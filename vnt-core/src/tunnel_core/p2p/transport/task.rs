@@ -409,8 +409,15 @@ pub async fn ping_all(
                     }
                 };
                 let route_key = route.route_key();
-                if socket_manager.send_to(ping, &route_key).await.is_ok() {
-                    packet_loss_stats.record_sent(id, route_key);
+                // 探测发送失败（隧道已回收/键不匹配等）不留静默：这是保活链路
+                // 断裂的第一现场，历史上被 is_ok() 吞掉导致无法定位
+                match socket_manager.send_to(ping, &route_key).await {
+                    Ok(()) => {
+                        packet_loss_stats.record_sent(id, route_key);
+                    }
+                    Err(error) => {
+                        log::warn!("route probe send failed: {route_key:?}: {error}");
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

@@ -88,6 +88,12 @@ impl Route {
     pub fn rtt(&self) -> u32 {
         self.rtt
     }
+    /// 路由是否已被 Ping/Pong 实测过。打洞/握手注册的路由携带 DEFAULT_RTT，
+    /// 只有证明回程可达（收到 Pong）才携带真实 RTT——未经实测的路由可能是
+    /// 单向半开路径（对端 NAT 只放进不放出），承载流量会黑洞
+    pub fn is_verified(&self) -> bool {
+        self.rtt != DEFAULT_RTT
+    }
     pub fn metric(&self) -> u8 {
         self.metric
     }
@@ -856,6 +862,49 @@ fn direct_route_matches_policy(route: &Route, policy: PunchPolicy) -> bool {
 mod tests {
     use super::*;
     use crate::tunnel_core::p2p::node_info::{NodeInfo, NodeInfoMap};
+
+    // 未实测路由（打洞注册，rtt=DEFAULT_RTT）与已实测路由的语义区分：
+    // 半开直连黑洞事故（r5900↔ncpe，2026-10-06）的选路修复依赖此判据
+    #[test]
+    fn verified_means_ping_measured_rtt() {
+        let key = RouteKey::new(
+            Protocol::UDP,
+            "0.0.0.0:48114".parse().unwrap(),
+            "1.2.3.4:1000".parse().unwrap(),
+        );
+        // 打洞/握手注册：只有默认 RTT，从未被 Pong 实测
+        assert!(!Route::from_default_rt(key, 1).is_verified());
+        // Pong 实测过（即使质量差）即已验证
+        assert!(Route::from_with_loss(key, 1, 9998, 9999).is_verified());
+        assert!(Route::from(key, 1, DEFAULT_RTT - 1).is_verified());
+    }
+
+    // 选路不变式：同目的节点同时存在"已实测中继"与"未实测直连"时，
+    // get_route_by_id 必须返回前者——单向半开直连不得抢占数据面
+    #[test]
+    fn measured_relay_outranks_unverified_direct_in_selection() {
+        let table = RouteTable::new();
+        let peer = Ipv4Addr::new(10, 26, 0, 5);
+        let direct_key = RouteKey::new(
+            Protocol::UDP,
+            "0.0.0.0:1991".parse().unwrap(),
+            "183.241.98.173:26360".parse().unwrap(),
+        );
+        let relay_key = RouteKey::new(
+            Protocol::TCP,
+            "0.0.0.0:1991".parse().unwrap(),
+            "140.143.159.25:39872".parse().unwrap(),
+        );
+        table.add_route(peer, Route::from_default_rt(direct_key, 1), true);
+        table.add_gossip_relay_route(peer, Route::from(relay_key, 2, 30));
+
+        let selected = table.get_route_by_id(&peer).unwrap();
+        assert_eq!(
+            selected.route_key(),
+            relay_key,
+            "未实测直连(rtt=9999)不得压过已实测中继"
+        );
+    }
 
     // LinkModel 分类口径：中继 / 局域网直连（RFC1918、链路本地、v6 ULA）/ 打洞直连（协议×地址族）
     #[test]
