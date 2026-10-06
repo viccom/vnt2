@@ -23,6 +23,7 @@ use crate::utils::task_control::TaskGroup;
 use rand::seq::SliceRandom;
 use rustp2p_core::endpoint::{Config as TunnelConfig, LengthPrefixedInitCodec, TunnelIncoming};
 use rustp2p_core::punch::Puncher;
+use rustp2p_core::route_table::RouteKey;
 use rustp2p_core::socket::LocalInterface;
 use std::collections::HashMap;
 #[cfg(test)]
@@ -474,6 +475,24 @@ pub async fn route_timeout_task(
 /// 隧道读空闲超时:超过该时长未收到对端数据则回收隧道
 const TUNNEL_READ_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// 对端地址等于本机接口地址的隧道是数据面黑洞：典型成因是对端经第三方
+/// 站点间隧道转发打洞包，出口被 MASQUERADE 改写成本机 IP——本机向"对端"
+/// 发包等于发给自己。这类隧道必须拒绝建立（数据、打洞应答一律丢弃），
+/// 逼对端的打洞落到真实路径上。loopback 放行：同机多实例经 127.0.0.1
+/// peer_address 互联是合法用法。NAT 探测未完成时不校验（fail-open），
+/// 由隧道读空闲超时兜底。
+fn is_self_sourced_tunnel(nat_info: &MyNatInfo, route_key: &RouteKey) -> bool {
+    let std::net::IpAddr::V4(ip) = route_key.peer_addr().ip() else {
+        return false;
+    };
+    if ip.is_loopback() {
+        return false;
+    }
+    nat_info
+        .get()
+        .is_some_and(|info| info.local_ipv4 == ip || info.local_ipv4s.contains(&ip))
+}
+
 /// 隧道收发调度与数据分发
 pub async fn tunnel_dispatch_task(
     nat_info: MyNatInfo,
@@ -484,6 +503,12 @@ pub async fn tunnel_dispatch_task(
 ) {
     while let Some(tunnel) = tunnel_incoming.next().await {
         let route_key = tunnel.route_key();
+        // 在注册与分发之前拒绝自源隧道：包不进处理器就不会注册 owner 路由、
+        // 不会回复打洞应答，对端打洞自然超时并改试真实路径
+        if is_self_sourced_tunnel(&nat_info, &route_key) {
+            log::warn!("忽略来自本机地址的隧道建立（经第三方隧道反射的打洞包）: {route_key:?}");
+            continue;
+        }
         let protocol = tunnel.protocol();
         let remote_addr = tunnel.remote_addr();
         let (mut reader, writer) = tunnel.split();
@@ -544,6 +569,43 @@ mod tests {
     #[test]
     fn dynamic_peer_refresh_interval_is_one_minute() {
         assert_eq!(DYNAMIC_PEER_REFRESH_INTERVAL, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn self_sourced_tunnel_is_rejected_only_for_own_interface_ips() {
+        // ncpe 场景：经第三方隧道转发 + MASQUERADE 后，打洞包源地址变成
+        // 本机出口 IP（10.83.40.196），这类隧道是数据面黑洞，必须拒绝
+        let my = MyNatInfo::default();
+        my.replace_nat_info(test_nat_info(Ipv4Addr::new(10, 83, 40, 196)));
+
+        let mk = |peer: &str| {
+            RouteKey::new(
+                Protocol::UDP,
+                "0.0.0.0:48114".parse().unwrap(),
+                peer.parse().unwrap(),
+            )
+        };
+        // 本机出口 IP（含 local_ipv4s 里的备用地址）→ 拒绝
+        assert!(is_self_sourced_tunnel(&my, &mk("10.83.40.196:36634")));
+        assert!(is_self_sourced_tunnel(&my, &mk("192.168.123.1:9999")));
+        // 真实对端（公网/虚拟网段/任意他机地址）→ 放行
+        assert!(!is_self_sourced_tunnel(&my, &mk("124.65.218.86:48114")));
+        assert!(!is_self_sourced_tunnel(&my, &mk("172.27.192.1:64520")));
+        // loopback 放行：同机多实例经 127.0.0.1 peer_address 互联是合法用法
+        assert!(!is_self_sourced_tunnel(&my, &mk("127.0.0.1:1991")));
+        // NAT 探测未完成时 fail-open，由隧道读空闲超时兜底
+        assert!(!is_self_sourced_tunnel(
+            &MyNatInfo::default(),
+            &mk("10.83.40.196:36634")
+        ));
+    }
+
+    fn test_nat_info(local: std::net::Ipv4Addr) -> rustp2p_core::nat::NatInfo {
+        rustp2p_core::nat::NatInfo {
+            local_ipv4: local,
+            local_ipv4s: vec![local, Ipv4Addr::new(192, 168, 123, 1)],
+            ..Default::default()
+        }
     }
 
     #[test]
