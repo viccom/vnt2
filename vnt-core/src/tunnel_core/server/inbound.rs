@@ -270,7 +270,17 @@ impl ServerTurnInboundHandler {
                 packet.set_src_id(network_addr.ip.into());
                 packet.set_dest_id(src.into());
                 packet.set_payload(&payload)?;
-                transport_client.send_turn(packet).await?;
+                // 结构性顺序保证：accepted 应答成功写出后才启动升级执行；
+                // 发送失败则放弃预订（防重入闸复位），下次指令可重试
+                match transport_client.send_turn(packet).await {
+                    Ok(()) => {
+                        crate::tunnel_core::server::generic_ctrl::kick_reserved_upgrade();
+                    }
+                    Err(error) => {
+                        crate::tunnel_core::server::generic_ctrl::abandon_reserved_upgrade();
+                        return Err(error);
+                    }
+                }
             }
             MsgType::GenericCtrlRes => {
                 let response = crate::protocol::generic_ctrl::GenericCtrlResponse::from_slice(

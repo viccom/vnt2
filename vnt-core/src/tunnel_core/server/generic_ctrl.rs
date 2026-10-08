@@ -103,18 +103,33 @@ fn handle_notify(id: u64, notify: GenericCtrlNotify, sink: &dyn NotifySink) -> G
     }
 }
 
-/// upgrade：先同步判定接受与否（并发防重入在 launcher 内），执行异步进行
+/// upgrade：先同步判定接受与否（平台防线 + 并发防重入），执行在应答
+/// 成功写出后由 kick_reserved_upgrade 启动（见 inbound.rs 接线）
 fn handle_upgrade(
     id: u64,
     upgrade: GenericCtrlUpgrade,
     launcher: &dyn UpgradeLauncher,
 ) -> GenericCtrlResponse {
-    // 拒绝（如并发防重入）不是信封级错误：accepted=false + error 带原因
-    let accepted = launcher.launch(upgrade).is_ok();
-    let error = if accepted {
-        String::new()
+    // 平台防线：制品目标平台与本节点不符直接拒绝（服务端 hello 筛选之外的
+    // 双保险；os/arch 为空 = 旧服务器指令未携带，跳过校验）
+    let platform_mismatch = (!upgrade.os.is_empty() && upgrade.os != std::env::consts::OS)
+        || (!upgrade.arch.is_empty() && upgrade.arch != std::env::consts::ARCH);
+    let outcome = if platform_mismatch {
+        Err(format!(
+            "制品平台 {}/{} 与本节点 {}/{} 不符",
+            upgrade.os,
+            upgrade.arch,
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
     } else {
-        "升级已被本节点拒绝（可能正在升级中）".to_string()
+        // 拒绝（并发防重入等）不是信封级错误：accepted=false + error 带原因
+        launcher.launch(upgrade)
+    };
+    let accepted = outcome.is_ok();
+    let error = match outcome {
+        Ok(()) => String::new(),
+        Err(reason) => reason,
     };
     GenericCtrlResponse {
         id,
@@ -246,21 +261,32 @@ impl NotifySink for AppStateNotifySink {
     }
 }
 
-/// 生产升级出口：tokio 任务执行升级；进程级防重入闸（exec 成功不回落，
-/// 闸位随进程消亡复位）
+/// 生产升级出口：只做"预订"——占进程级防重入闸并暂存计划；真正执行由
+/// kick_reserved_upgrade 在 accepted 应答成功写出后触发（inbound.rs），
+/// 应答发送失败走 abandon_reserved_upgrade 释放闸位。
+/// exec 成功不回落，闸位随进程消亡复位。
 struct SpawnUpgradeLauncher;
 
 static UPGRADE_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static RESERVED_UPGRADE: Mutex<Option<GenericCtrlUpgrade>> = Mutex::new(None);
 
 impl UpgradeLauncher for SpawnUpgradeLauncher {
     fn launch(&self, upgrade: GenericCtrlUpgrade) -> Result<(), String> {
         if UPGRADE_IN_PROGRESS.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return Err("升级已在进行中，拒绝重复指令".to_string());
         }
+        *RESERVED_UPGRADE.lock() = Some(upgrade);
+        Ok(())
+    }
+}
+
+/// 启动已预订的升级执行。只在 accepted 应答成功写出后调用——顺序保证
+/// 是结构性的（inbound.rs 先 send_turn 后 kick），不再依赖延时猜测。
+pub(crate) fn kick_reserved_upgrade() {
+    if let Some(upgrade) = RESERVED_UPGRADE.lock().take() {
+        let target_version = upgrade.version.clone();
         tokio::spawn(async move {
-            // 宽限期：确保 accepted 应答先于进程替换排干（见计划 T5 顺序断言）
-            tokio::time::sleep(Duration::from_millis(500)).await;
             let plan = crate::upgrade::UpgradePlan {
                 version: upgrade.version,
                 url: upgrade.url,
@@ -270,11 +296,37 @@ impl UpgradeLauncher for SpawnUpgradeLauncher {
             };
             if let Err(error) = crate::upgrade::run_upgrade(plan).await {
                 log::error!("远程升级执行失败: {error:#}");
+                // 失败回执：写入标记（持久化），连接管理器周期上报发出
+                record_upgrade_failure(&target_version, &format!("{error:#}"));
                 UPGRADE_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
             }
-            // 成功路径 run_upgrade 以 exec 结束，不会返回
+            // 成功路径 run_upgrade 以 exec/exit 结束，不会返回
         });
-        Ok(())
+    }
+}
+
+/// 放弃已预订的升级（accepted 应答发送失败时调用，释放防重入闸）
+pub(crate) fn abandon_reserved_upgrade() {
+    if RESERVED_UPGRADE.lock().take().is_some() {
+        UPGRADE_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// 就地失败结果落盘：连接存活时由周期上报发出，进程崩溃则重启后补报
+fn record_upgrade_failure(to_version: &str, error: &str) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let marker = crate::upgrade::UpgradeMarker {
+        from_version: env!("CARGO_PKG_VERSION").to_string(),
+        to_version: to_version.to_string(),
+        started_at: crate::utils::time::now_ts_ms(),
+        failure: Some(error.to_string()),
+    };
+    if let Err(write_error) =
+        crate::upgrade::write_marker(&crate::upgrade::marker_path(&exe), &marker)
+    {
+        log::warn!("升级失败标记写入失败（失败原因将不上报）: {write_error:#}");
     }
 }
 
@@ -295,30 +347,40 @@ pub(crate) async fn dispatch_request(
     .await
 }
 
-/// 升级重启后的结果上报：读到标记即发送、发送成功即清标记。
-/// 应答为尽力而为（不等待——data_handle_loop 内等待会与读循环死锁），
-/// 平台另有版本观测兜底。在连接建立后调用。
-pub(crate) async fn report_pending_upgrade_result(
+/// 升级标记的互斥 claim 文件路径（多服务器连接并发出报时只留一个发送者）
+fn marker_claim_path(marker: &std::path::Path) -> std::path::PathBuf {
+    let mut name = marker.as_os_str().to_os_string();
+    name.push(".claim");
+    std::path::PathBuf::from(name)
+}
+
+/// 尝试独占 claim；已存在且超过 60s 视为崩溃残留，可窃取
+fn try_claim(claim: &std::path::Path) -> bool {
+    let create = |path: &std::path::Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .is_ok()
+    };
+    if create(claim) {
+        return true;
+    }
+    let stealable = std::fs::metadata(claim)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age > Duration::from_secs(60));
+    stealable && std::fs::remove_file(claim).is_ok() && create(claim)
+}
+
+async fn send_upgrade_result(
     transport: &mut crate::tunnel_core::server::transport::TransportClient,
-) {
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let marker_path = crate::upgrade::marker_path(&exe);
-    let Some(marker) = crate::upgrade::read_marker(&marker_path) else {
-        return;
-    };
-    let (success, error) = crate::upgrade::evaluate_marker(&marker, env!("CARGO_PKG_VERSION"));
+    result: crate::protocol::generic_ctrl::GenericCtrlUpgradeResult,
+) -> anyhow::Result<()> {
     let request = GenericCtrlRequest {
         id: GenericCtrlNotifier::global().allocate_id(),
-        body: Some(GenericCtrlBody::UpgradeResult(
-            crate::protocol::generic_ctrl::GenericCtrlUpgradeResult {
-                success,
-                from_version: marker.from_version.clone(),
-                to_version: marker.to_version.clone(),
-                error,
-            },
-        )),
+        body: Some(GenericCtrlBody::UpgradeResult(result)),
     };
     let payload = request.encode();
     let mut packet = match crate::protocol::ip_packet_protocol::NetPacket::new(
@@ -327,22 +389,52 @@ pub(crate) async fn report_pending_upgrade_result(
         ),
     ) {
         Ok(packet) => packet,
-        Err(error) => {
-            log::warn!("构造升级结果上报包失败: {error}");
-            return;
-        }
+        Err(error) => anyhow::bail!("构造升级结果上报包失败: {error}"),
     };
     // 帧风格对齐 rpc.rs 的 RpcReq：gateway 包由会话绑定，无需显式 src/dest
     packet.set_msg_type(crate::protocol::ip_packet_protocol::MsgType::GenericCtrlReq);
     packet.set_gateway_flag(true);
     packet.set_ttl(1);
-    if let Err(error) = packet.set_payload(payload.as_ref()) {
-        log::warn!("升级结果上报载荷写入失败: {error}");
+    packet.set_payload(payload.as_ref())?;
+    transport.send_turn(packet).await
+}
+
+/// 升级结果上报：读到标记即发送、发送成功即清标记。
+/// 在连接建立后与周期 tick 调用（就地失败也写标记 → 存活连接 ≤5s 内上报）。
+/// 应答为尽力而为（不等待——data_handle_loop 内等待会与读循环死锁），
+/// 平台另有版本观测兜底；claim 文件防多服务器连接重复上报。
+pub(crate) async fn report_pending_upgrade_result(
+    transport: &mut crate::tunnel_core::server::transport::TransportClient,
+) {
+    let Ok(exe) = std::env::current_exe() else {
         return;
+    };
+    let marker_path = crate::upgrade::marker_path(&exe);
+    if !marker_path.exists() {
+        return; // 周期调用的快速路径：绝大多数 tick 无标记
     }
-    match transport.send_turn(packet).await {
+    let claim_path = marker_claim_path(&marker_path);
+    if !try_claim(&claim_path) {
+        return; // 另一条服务器连接正在上报
+    }
+    let release_claim = || {
+        let _ = std::fs::remove_file(&claim_path);
+    };
+    let Some(marker) = crate::upgrade::read_marker(&marker_path) else {
+        release_claim();
+        return;
+    };
+    let (success, error) = crate::upgrade::evaluate_marker(&marker, env!("CARGO_PKG_VERSION"));
+    let result = crate::protocol::generic_ctrl::GenericCtrlUpgradeResult {
+        success,
+        from_version: marker.from_version.clone(),
+        to_version: marker.to_version.clone(),
+        error,
+    };
+    match send_upgrade_result(transport, result).await {
         Ok(()) => {
             crate::upgrade::clear_marker(&marker_path);
+            release_claim();
             log::info!(
                 "升级结果已上报（{} → {}，success={success}）",
                 marker.from_version,
@@ -350,7 +442,9 @@ pub(crate) async fn report_pending_upgrade_result(
             );
         }
         Err(error) => {
-            log::warn!("升级结果上报失败（保留标记待下次重连）: {error}");
+            // 保留标记待重试；释放 claim 让本连接下个 tick 或其他连接接手
+            release_claim();
+            log::warn!("升级结果上报失败（保留标记待下次上报）: {error}");
         }
     }
 }
@@ -524,6 +618,8 @@ mod tests {
                     sha256: vec![1; 32],
                     size: 1,
                     filename: "vnt2_web".into(),
+                    os: String::new(),
+                    arch: String::new(),
                 })),
             },
             &SinkDouble::default(),
@@ -559,6 +655,8 @@ mod tests {
                     sha256: Vec::new(),
                     size: 0,
                     filename: String::new(),
+                    os: String::new(),
+                    arch: String::new(),
                 })),
             },
             &SinkDouble::default(),
@@ -571,6 +669,75 @@ mod tests {
         };
         assert!(!ack.accepted);
         assert!(!response.error.is_empty());
+    }
+
+    // F1: 平台不符 → 不调用执行器，accepted=false 带原因（本机 os 必不匹配）
+    #[tokio::test]
+    async fn upgrade_platform_mismatch_rejected_without_launch() {
+        let launcher = LauncherDouble::default();
+        let response = dispatch(
+            GenericCtrlRequest {
+                id: 8,
+                body: Some(GenericCtrlBody::Upgrade(GenericCtrlUpgrade {
+                    version: "2.0.12".into(),
+                    url: String::new(),
+                    sha256: Vec::new(),
+                    size: 0,
+                    filename: String::new(),
+                    os: format!("{}-mismatch", std::env::consts::OS),
+                    arch: std::env::consts::ARCH.to_string(),
+                })),
+            },
+            &SinkDouble::default(),
+            &launcher,
+            &agent(),
+        )
+        .await;
+        let Some(GenericCtrlResponseBody::Upgrade(ack)) = response.body else {
+            panic!("expected upgrade ack");
+        };
+        assert!(!ack.accepted);
+        assert!(response.error.contains("平台"));
+        assert_eq!(
+            launcher.launches.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    // F4: 预订生命周期——空槽 kick 无副作用、重入拒绝、abandon 释放
+    #[test]
+    fn reservation_lifecycle_rejects_reentry_and_release() {
+        kick_reserved_upgrade(); // 空槽位 no-op
+        let upgrade = GenericCtrlUpgrade {
+            version: "9.9.9".into(),
+            url: String::new(),
+            sha256: Vec::new(),
+            size: 0,
+            filename: String::new(),
+            os: String::new(),
+            arch: String::new(),
+        };
+        assert!(SpawnUpgradeLauncher.launch(upgrade.clone()).is_ok());
+        // 防重入：闸位已占
+        assert!(SpawnUpgradeLauncher.launch(upgrade.clone()).is_err());
+        abandon_reserved_upgrade();
+        assert!(SpawnUpgradeLauncher.launch(upgrade).is_ok());
+        abandon_reserved_upgrade();
+    }
+
+    // M6: claim 独占——占用后第二个 claim 失败，释放后可再占
+    #[test]
+    fn marker_claim_is_exclusive() {
+        let dir = std::env::temp_dir().join(format!("vnt-upg-cl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let claim = dir.join("m.claim");
+        let _ = std::fs::remove_file(&claim);
+        assert!(try_claim(&claim));
+        assert!(!try_claim(&claim));
+        std::fs::remove_file(&claim).unwrap();
+        assert!(try_claim(&claim));
+        std::fs::remove_file(&claim).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // T7: 待决表 id 关联唤醒

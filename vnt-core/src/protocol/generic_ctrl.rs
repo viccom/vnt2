@@ -45,6 +45,9 @@ pub(crate) struct GenericCtrlUpgrade {
     pub sha256: Vec<u8>,
     pub size: u64,
     pub filename: String,
+    /// 制品目标平台（空 = 旧服务器未携带，节点跳过平台防线）
+    pub os: String,
+    pub arch: String,
 }
 
 /// 升级结果回执载荷
@@ -196,6 +199,8 @@ fn request_body_to_proto(body: &GenericCtrlBody) -> proto::generic_ctrl_request:
                 sha256: upgrade.sha256.clone(),
                 size: upgrade.size,
                 filename: upgrade.filename.clone(),
+                os: upgrade.os.clone(),
+                arch: upgrade.arch.clone(),
             })
         }
         GenericCtrlBody::UpgradeResult(result) => {
@@ -228,6 +233,8 @@ fn request_body_from_proto(body: proto::generic_ctrl_request::Body) -> GenericCt
                 sha256: upgrade.sha256,
                 size: upgrade.size,
                 filename: upgrade.filename,
+                os: upgrade.os,
+                arch: upgrade.arch,
             })
         }
         proto::generic_ctrl_request::Body::UpgradeResult(result) => {
@@ -300,6 +307,8 @@ mod tests {
                 sha256: vec![7; 32],
                 size: 10_000_000,
                 filename: "vnt2_web-linux-x86_64".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
             }),
             GenericCtrlBody::UpgradeResult(GenericCtrlUpgradeResult {
                 success: true,
@@ -401,6 +410,8 @@ mod tests {
                 sha256: Vec::new(),
                 size: 0,
                 filename: String::new(),
+                os: String::new(),
+                arch: String::new(),
             }),
             GenericCtrlBody::UpgradeResult(GenericCtrlUpgradeResult {
                 success: false,

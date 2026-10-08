@@ -69,6 +69,9 @@ message GenericCtrlUpgrade {
   // 制品字节数
   uint64 size = 4;
   string filename = 5;
+  // 制品目标平台（空 = 旧服务器未携带，节点跳过平台防线）
+  string os = 6;
+  string arch = 7;
 }
 
 message GenericCtrlUpgradeAck {

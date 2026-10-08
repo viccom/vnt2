@@ -571,6 +571,13 @@ impl ServerTurnManager {
             Duration::from_secs(30),
         );
         p2p_report_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // 升级结果上报：就地失败（下载/校验/替换失败）写标记后由此周期发出，
+        // 多服务器连接由 claim 文件互斥（≤5s 延迟，换取无额外唤醒机制）
+        let mut upgrade_report_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        upgrade_report_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 Some((buf,expired)) = receiver.recv() => {
@@ -598,6 +605,12 @@ impl ServerTurnManager {
                 }
                 _ = p2p_report_interval.tick() => {
                     data_handler.handle_p2p_report(&mut self.transport_client).await?;
+                }
+                _ = upgrade_report_interval.tick() => {
+                    crate::tunnel_core::server::generic_ctrl::report_pending_upgrade_result(
+                        &mut self.transport_client,
+                    )
+                    .await;
                 }
                 else => {
                     bail!("receiver closed");

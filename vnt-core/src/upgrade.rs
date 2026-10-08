@@ -27,6 +27,9 @@ pub struct UpgradeMarker {
     pub from_version: String,
     pub to_version: String,
     pub started_at: i64,
+    /// 就地失败结果（下载/校验/替换/exec 失败时写入，连接存活期间由
+    /// 周期上报发出；None = 重启路径，按当前版本判定成败）
+    pub failure: Option<String>,
 }
 
 /// 暂存文件路径：与可执行文件同目录（同文件系统保证 rename 原子性）
@@ -50,10 +53,14 @@ pub fn marker_path(exe: &Path) -> PathBuf {
 }
 
 pub fn write_marker(path: &Path, marker: &UpgradeMarker) -> anyhow::Result<()> {
-    let content = format!(
+    let mut content = format!(
         "from_version={}\nto_version={}\nstarted_at={}\n",
         marker.from_version, marker.to_version, marker.started_at
     );
+    if let Some(failure) = &marker.failure {
+        // 标记按行解析，失败原因压平为单行
+        content.push_str(&format!("failure={}\n", failure.replace('\n', " ")));
+    }
     fs::write(path, content).with_context(|| format!("写入升级标记失败: {}", path.display()))
 }
 
@@ -62,6 +69,7 @@ pub fn read_marker(path: &Path) -> Option<UpgradeMarker> {
     let mut from_version = String::new();
     let mut to_version = String::new();
     let mut started_at = 0;
+    let mut failure = None;
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("from_version=") {
             from_version = value.to_string();
@@ -69,6 +77,8 @@ pub fn read_marker(path: &Path) -> Option<UpgradeMarker> {
             to_version = value.to_string();
         } else if let Some(value) = line.strip_prefix("started_at=") {
             started_at = value.parse().unwrap_or(0);
+        } else if let Some(value) = line.strip_prefix("failure=") {
+            failure = Some(value.to_string());
         }
     }
     if from_version.is_empty() || to_version.is_empty() {
@@ -78,6 +88,7 @@ pub fn read_marker(path: &Path) -> Option<UpgradeMarker> {
         from_version,
         to_version,
         started_at,
+        failure,
     })
 }
 
@@ -85,9 +96,12 @@ pub fn clear_marker(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
-/// 重启后判定升级结果：当前版本与标记目标一致 = 成功；
-/// 不一致（替换后未生效/回滚）= 失败
+/// 重启后判定升级结果：标记带就地失败结果 = 失败；否则当前版本与标记
+/// 目标一致 = 成功；不一致（替换后未生效/回滚）= 失败
 pub fn evaluate_marker(marker: &UpgradeMarker, current_version: &str) -> (bool, String) {
+    if let Some(failure) = marker.failure.as_ref().filter(|f| !f.is_empty()) {
+        return (false, failure.clone());
+    }
     if current_version == marker.to_version {
         (true, String::new())
     } else {
@@ -192,9 +206,16 @@ pub fn apply_binary(exe: &Path, staged: &Path) -> anyhow::Result<()> {
         let _ = fs::remove_file(&old);
         fs::rename(exe, &old)
             .with_context(|| format!("旧二进制改名失败: {} -> {}", exe.display(), old.display()))?;
-        fs::rename(staged, exe).with_context(|| {
-            format!("替换二进制失败: {} -> {}", staged.display(), exe.display())
-        })?;
+        if let Err(error) = fs::rename(staged, exe) {
+            // 回滚旧二进制：否则下次启动时 exe 路径不存在，节点无法拉起
+            if let Err(rollback) = fs::rename(&old, exe) {
+                return Err(anyhow::anyhow!(
+                    "替换二进制失败: {error}；回滚旧二进制也失败（{rollback}），{} 需人工恢复",
+                    exe.display()
+                ));
+            }
+            return Err(anyhow::anyhow!("替换二进制失败（已回滚旧二进制）: {error}"));
+        }
     }
     Ok(())
 }
@@ -291,6 +312,7 @@ pub async fn run_upgrade(plan: UpgradePlan) -> anyhow::Result<()> {
             from_version: env!("CARGO_PKG_VERSION").to_string(),
             to_version: plan.version.clone(),
             started_at: crate::utils::time::now_ts_ms(),
+            failure: None,
         },
     )?;
     apply_binary(&exe, &staging)?;
@@ -425,11 +447,34 @@ mod tests {
             from_version: "2.0.11".into(),
             to_version: "2.0.12".into(),
             started_at: 1699000000,
+            failure: None,
         };
         write_marker(&path, &marker).unwrap();
         assert_eq!(read_marker(&path), Some(marker));
         clear_marker(&path);
         assert_eq!(read_marker(&path), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // F3: 就地失败结果随标记持久化（含换行压平），evaluate 直接采用
+    #[test]
+    fn marker_failure_outcome_round_trip() {
+        let dir = std::env::temp_dir().join(format!("vnt-upg-mf-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pending");
+        let marker = UpgradeMarker {
+            from_version: "2.0.11".into(),
+            to_version: "2.0.12".into(),
+            started_at: 1699000000,
+            failure: Some("下载失败: 连接超时\n第二行".into()),
+        };
+        write_marker(&path, &marker).unwrap();
+        let read = read_marker(&path).unwrap();
+        // 换行被压平为单行，其余字段保留
+        assert_eq!(read.failure.as_deref(), Some("下载失败: 连接超时 第二行"));
+        let (ok, reason) = evaluate_marker(&read, "2.0.11");
+        assert!(!ok);
+        assert!(reason.contains("连接超时"));
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -451,6 +496,7 @@ mod tests {
             from_version: "2.0.11".into(),
             to_version: "2.0.12".into(),
             started_at: 0,
+            failure: None,
         };
         let (ok, _) = evaluate_marker(&marker, "2.0.12");
         assert!(ok);
