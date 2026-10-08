@@ -45,7 +45,7 @@ pnpm build:web    # 根目录执行 = pnpm --filter vnt-web-ui build
 
 | crate / 路径 | 职责 |
 |------|------|
-| `vnt-core` | 内核：tun、加解密、打洞、FEC、NAT、路由（api / tunnel_core / nat / fec / crypto / port_mapping …） |
+| `vnt-core` | 内核：tun、加解密、打洞、FEC、NAT、路由、远程升级执行器（api / tunnel_core / nat / fec / crypto / port_mapping / upgrade …） |
 | `vnt-web` | `vnt2_web` 后端：axum HTTP 服务（service_http.rs，/api/peers、/api/config、/api/start …）+ `ui/` 前端 |
 | `vnt-ipc` | vnt2_cli ↔ vnt2_ctrl 的进程间通信 |
 | `vnt-jni` | Android JNI 绑定 |
@@ -58,13 +58,15 @@ pnpm build:web    # 根目录执行 = pnpm --filter vnt-web-ui build
 
 1. **跨仓库协议镜像**：`vnt-core/src/protocol/control_message.rs` 及 proto 与服务端仓库 [vnt-dev/vnts](https://github.com/vnt-dev/vnts) 互为镜像，任何改动必须双侧同 commit 语义对齐，roundtrip 测试双侧锁定。新增 MsgType 依赖的服务器改动**必须先部署服务器，后分发客户端**（旧服务器 + 新客户端 = 断连）。
 2. 未知 MsgType / 未知 proto 字段必须容忍：解码侧不因新增字段失败（prost 跳过未知字段），客户端不得假设服务器永远同版本。
-3. 连接模型分类（`LinkModel`：Lan / PunchUdpV4 / PunchUdpV6 / PunchTcpV4 / PunchTcpV6 / Relay）在 vnt-core `route_table.rs` 的 `Route::link_model()`，`vnt-web` /api/peers 的 `mode` 字段与 vnts2 拓扑视图都消费它——改动分类逻辑时同步核对所有消费方。
-4. P2P 状态周期上报（`P2pStatusReportMsg`，peers 全量覆盖 + links 明细）节拍与格式改动，须与 vnts2 侧 `update_p2p_peers` 的存储语义对齐。
-5. 禁止提交运行产物与密钥；`vnt-web/ui` 构建产物只经 build.rs 进 `vnt-web/static`（gitignore）。
+3. **管理类指令扩展走 GenericCtrl(33/34)**：`vnt-core/proto/generic_ctrl.proto` + `src/protocol/generic_ctrl.rs`（转换层）+ `src/tunnel_core/server/generic_ctrl.rs`（dispatch 臂）三处成套增改，与服务端同 commit；扩展步骤与多轮交互模式见 vnts2 仓库 `docs/generic-ctrl-extension-guide.md`。不再为管理指令新占 MsgType。
+4. 连接模型分类（`LinkModel`：Lan / PunchUdpV4 / PunchUdpV6 / PunchTcpV4 / PunchTcpV6 / Relay）在 vnt-core `route_table.rs` 的 `Route::link_model()`，`vnt-web` /api/peers 的 `mode` 字段与 vnts2 拓扑视图都消费它——改动分类逻辑时同步核对所有消费方。
+5. P2P 状态周期上报（`P2pStatusReportMsg`，peers 全量覆盖 + links 明细）节拍与格式改动，须与 vnts2 侧 `update_p2p_peers` 的存储语义对齐。
+6. 禁止提交运行产物与密钥；`vnt-web/ui` 构建产物只经 build.rs 进 `vnt-web/static`（gitignore）。
 
 ## 纪律
 
 - TDD：新功能先写失败测试再实现；交付前 vnt-core `cargo test --lib` + `clippy` 0 警告全绿
+- **发版版本号双 crate 同步**：节点对外版本统一取 vnt-core 的 `CARGO_PKG_VERSION`（注册信息、hello 上报、升级自检都用它）——发版必须同时 bump 根 vnt2 与 vnt-core 两个 crate，只 bump 一个会导致远程升级的版本自检必然失败（2026-10-08 实测）
 - 提交：conventional commits（feat/fix/docs/refactor/test/chore），中文描述正文
 - 注释写"为什么"而非"做什么"
 - 精准修改：只碰必须碰的文件，不重构没坏的代码，不顺手改无关格式
@@ -73,6 +75,7 @@ pnpm build:web    # 根目录执行 = pnpm --filter vnt-web-ui build
 ## Rust 约定
 
 - tokio 异步；周期任务 `interval_at` + `MissedTickBehavior::Skip`（参照 vnt-core connection_manager.rs）
+- **控制连接读循环内禁止 await 等待对端应答**——应答从同一循环进来，等待即死锁；需要应答的交互用待决表在独立任务中限时等待（参照 `GenericCtrlNotifier`），读循环内路径一律发后即弃（参照 `report_pending_upgrade_result` 注释，实测教训）
 - 共享状态经 Context / Arc 句柄，克隆即共享
 - 锁跨 await 不持有
 
