@@ -594,6 +594,8 @@ impl ServerTurnInboundHandler {
         let msg = super::p2p_report::build_p2p_status_report(
             &self.app_state.route_table,
             &self.app_state.nat_info,
+            &self.app_state.traffic_stats,
+            self.network_addr(),
         );
         let packet = super::p2p_report::p2p_report_packet(&msg)?;
         transport_client
