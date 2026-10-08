@@ -79,6 +79,8 @@ pub(crate) fn build_p2p_status_report(
             .is_some_and(|info| info.nat_type == NatType::Cone),
         links,
         relay_links,
+        // Task 2 接入端到端流量快照；本任务（协议层）先空列表占位
+        traffic: Vec::new(),
     }
 }
 
@@ -100,7 +102,7 @@ pub(crate) fn p2p_report_packet(
 mod tests {
     use super::*;
     use crate::context::nat::MyNatInfo;
-    use crate::protocol::control_message::P2pStatusReportMsg;
+    use crate::protocol::control_message::{P2pStatusReportMsg, P2pTraffic};
     use crate::protocol::ip_packet_protocol::MsgType;
     use rustp2p_core::nat::{NatInfo, NatType};
     use rustp2p_core::route_table::{Protocol, RouteKey};
@@ -167,6 +169,12 @@ mod tests {
                 via: Ipv4Addr::new(10, 26, 0, 2),
                 rtt: 55,
             }],
+            // T1: 顺带锁定 u64 大值 varint 无损（端到端累计可远超 u32）
+            traffic: vec![P2pTraffic {
+                peer: Ipv4Addr::new(10, 26, 0, 3),
+                tx_bytes: 1u64 << 40,
+                rx_bytes: 5,
+            }],
         };
         let packet = p2p_report_packet(&msg).unwrap();
         assert_eq!(packet.msg_type().unwrap(), MsgType::P2pStatusReport);
@@ -176,6 +184,21 @@ mod tests {
             P2pStatusReportMsg::from_slice(packet.payload()).unwrap(),
             msg
         );
+    }
+
+    // T1: 旧客户端 wire（字段 5 不出现）→ traffic 解码为空列表（边不显示流量）
+    #[test]
+    fn decode_legacy_report_without_traffic() {
+        let legacy = P2pStatusReportMsg {
+            peers: vec![Ipv4Addr::new(10, 26, 0, 9)],
+            nat_cone: false,
+            links: vec![],
+            relay_links: vec![],
+            traffic: vec![],
+        }
+        .encode();
+        let msg = P2pStatusReportMsg::from_slice(&legacy).unwrap();
+        assert!(msg.traffic.is_empty());
     }
 
     // T21: 直连链路明细——按最高分 direct 路由分类，与 peers 镜像，relay 目的不混入
@@ -273,6 +296,7 @@ mod tests {
             nat_cone: false,
             links: vec![],
             relay_links: vec![],
+            traffic: vec![],
         }
         .encode();
         let msg = P2pStatusReportMsg::from_slice(&legacy).unwrap();

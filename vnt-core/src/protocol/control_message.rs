@@ -452,6 +452,14 @@ pub(crate) struct P2pRelayLink {
     pub rtt: u32,
 }
 
+/// 单个对端的端到端累计流量（本次网络会话内；停网/重启清零）
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct P2pTraffic {
+    pub peer: Ipv4Addr,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+}
+
 /// 客户端上报的本机 P2P 直连状态（MsgType::P2pStatusReport 的载荷）
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct P2pStatusReportMsg {
@@ -463,6 +471,9 @@ pub(crate) struct P2pStatusReportMsg {
     /// 已验证节点中继路由。字段 4 加法扩展：旧服务器跳过未知字段、
     /// 旧客户端不填（空列表）
     pub relay_links: Vec<P2pRelayLink>,
+    /// 按对端的端到端流量快照。字段 5 加法扩展：旧服务器跳过未知字段、
+    /// 旧客户端不填（空列表，边不显示流量）
+    pub traffic: Vec<P2pTraffic>,
 }
 
 impl P2pStatusReportMsg {
@@ -491,6 +502,15 @@ impl P2pStatusReportMsg {
                     rtt: l.rtt,
                 })
                 .collect(),
+            traffic: msg
+                .traffic
+                .into_iter()
+                .map(|t| P2pTraffic {
+                    peer: Ipv4Addr::from(t.peer),
+                    tx_bytes: t.tx_bytes,
+                    rx_bytes: t.rx_bytes,
+                })
+                .collect(),
         })
     }
 
@@ -514,6 +534,15 @@ impl P2pStatusReportMsg {
                     dest: u32::from(l.dest),
                     via: u32::from(l.via),
                     rtt: l.rtt,
+                })
+                .collect(),
+            traffic: self
+                .traffic
+                .iter()
+                .map(|t| proto::P2pTrafficMsg {
+                    peer: u32::from(t.peer),
+                    tx_bytes: t.tx_bytes,
+                    rx_bytes: t.rx_bytes,
                 })
                 .collect(),
         }

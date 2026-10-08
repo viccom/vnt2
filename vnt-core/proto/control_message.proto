@@ -165,6 +165,9 @@ message P2pStatusReportMsg {
     // Verified node-relayed routes (gossip metric-2). Field 4 is additive:
     // old servers skip it via prost; old clients omit it (empty)
     repeated P2pRelayLinkMsg relay_links = 4;
+    // Per-peer endpoint traffic (node-side TrafficStats snapshot). Field 5 is additive:
+    // old servers skip it via prost; old clients omit it (empty list, edges show no traffic)
+    repeated P2pTrafficMsg traffic = 5;
 }
 
 // Single verified node-relayed route detail
@@ -175,6 +178,17 @@ message P2pRelayLinkMsg {
     fixed32 via = 2;
     // End-to-end RTT of the two-hop path in milliseconds
     uint32 rtt = 3;
+}
+
+// Single per-peer endpoint traffic entry (cumulative over the node's current
+// network session; cleared on network stop / process restart)
+message P2pTrafficMsg {
+    // Peer virtual IP
+    fixed32 peer = 1;
+    // Total bytes the node has sent to this peer (all paths: direct, node-relayed, server-relayed)
+    uint64 tx_bytes = 2;
+    // Total bytes the node has received from this peer
+    uint64 rx_bytes = 3;
 }
 
 message SubnetSyncResponse {
