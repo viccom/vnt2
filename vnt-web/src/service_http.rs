@@ -597,6 +597,35 @@ async fn subscription_identity(state: &HttpAppState, file_name: &str) -> (String
     manager.lock().await.managed_identity().unwrap_or_default()
 }
 
+/// 解析本地配置为 StartConfig。订阅模式（有 subscription 且本地未写
+/// network_code）时注入空占位身份——与 CLI resolve_configuration 的托管
+/// 占位一致，首份信封到达后由 merge_present_config 以信封身份覆盖；
+/// 无订阅时仍严格要求 network_code，缺失即报错。
+fn parse_local_start_config(
+    local: &toml::Value,
+    local_content: &str,
+) -> anyhow::Result<StartConfig> {
+    let local_table = local.as_table().context("本地配置 TOML 根节点必须是表")?;
+    let managed_missing_code = local_table
+        .get("subscription")
+        .and_then(toml::Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+        && !local_table.contains_key("network_code");
+    if !managed_missing_code {
+        return toml::from_str(local_content).map_err(Into::into);
+    }
+    let mut patched = local.clone();
+    patched
+        .as_table_mut()
+        .context("本地配置 TOML 根节点必须是表")?
+        .insert(
+            "network_code".to_string(),
+            toml::Value::String(String::new()),
+        );
+    let patched_content = toml::to_string(&patched)?;
+    Ok(toml::from_str(&patched_content)?)
+}
+
 /// 解析本地配置并创建配置管理器（订阅模式在此等待服务端首份配置并启动
 /// 首个组网实例）。管理器存入实例表，跨组网实例重建保留。
 async fn resolve_subscription_config_with_retry(
@@ -607,7 +636,7 @@ async fn resolve_subscription_config_with_retry(
 ) -> anyhow::Result<StartConfig> {
     let local: toml::Value = toml::from_str(local_content).context("本地配置 TOML 无效")?;
     let local_table = local.as_table().context("本地配置 TOML 根节点必须是表")?;
-    let start_config: StartConfig = toml::from_str(local_content)?;
+    let start_config = parse_local_start_config(&local, local_content)?;
     let local_core = convert_config(start_config.clone())?;
 
     // 旧的配置管理器先摘除（Drop 会停止组网实例并断开订阅控制连接）
@@ -3149,6 +3178,44 @@ config_name = "local-label"
             assert!(resolve_static_path("..\\..\\Cargo.toml").is_none());
             assert!(resolve_static_path("C:/Windows/win.ini").is_none());
         }
+    }
+
+    #[test]
+    fn test_parse_local_start_config_subscription_without_network_code() {
+        // 订阅-only 配置：身份由服务端信封下发，本地缺失 network_code 时
+        // 注入空占位以通过严格解析（此前直接报 missing field `network_code`）
+        let content = r#"subscription = "vnt2://join/2/eyJ2IjoyLCJzZXJ2ZXIiOiJ0Y3A6Ly9leGFtcGxlLmNvbToyOTg3MiJ9""#;
+        let local: toml::Value = toml::from_str(content).unwrap();
+        let config = parse_local_start_config(&local, content)
+            .expect("订阅配置缺 network_code 时应以占位身份解析成功");
+        assert_eq!(config.network_code, "");
+        assert_eq!(
+            config.subscription.as_deref(),
+            Some("vnt2://join/2/eyJ2IjoyLCJzZXJ2ZXIiOiJ0Y3A6Ly9leGFtcGxlLmNvbToyOTg3MiJ9")
+        );
+    }
+
+    #[test]
+    fn test_parse_local_start_config_subscription_keeps_local_network_code() {
+        // 订阅配置但本地显式写了 network_code：保持本地值，不注入占位
+        let content = r#"subscription = "vnt2://join/2/x"
+network_code = "dongnet""#;
+        let local: toml::Value = toml::from_str(content).unwrap();
+        let config = parse_local_start_config(&local, content).unwrap();
+        assert_eq!(config.network_code, "dongnet");
+    }
+
+    #[test]
+    fn test_parse_local_start_config_requires_network_code_without_subscription() {
+        // 非订阅配置缺 network_code：必须维持原有的严格报错（回归防线）
+        let content = r#"server = ["tcp://1.2.3.4:29872"]"#;
+        let local: toml::Value = toml::from_str(content).unwrap();
+        let error = parse_local_start_config(&local, content)
+            .expect_err("非订阅配置缺 network_code 必须报错");
+        assert!(
+            error.to_string().contains("network_code"),
+            "错误信息应指向 network_code，实际: {error}"
+        );
     }
 
     fn new_test_state() -> HttpAppState {
