@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package protocol.generic_ctrl;
+
+// 通用控制信令（MsgType::GenericCtrlReq=33 / GenericCtrlRes=34）的载荷。
+// 设计约束：新管理指令 = 新增 oneof 变体，不再新占 MsgType；
+// 加法扩展语义见 docs/plans/2026-10-08-generic-ctrl-plan.md（两侧镜像，勿单侧改动）。
+
+enum GenericCtrlStatus {
+  GENERIC_CTRL_OK = 0;
+  // 对端不认识该指令变体（版本/能力差异，非错误）
+  GENERIC_CTRL_UNSUPPORTED = 1;
+  // 指令执行失败，原因在 error 字段
+  GENERIC_CTRL_ERROR = 2;
+}
+
+message GenericCtrlRequest {
+  // 关联 ID：发起方生成、应答原样带回
+  uint64 id = 1;
+  oneof body {
+    GenericCtrlHello hello = 10;
+    GenericCtrlNotify notify = 11;
+    GenericCtrlUpgrade upgrade = 12;
+    GenericCtrlUpgradeResult upgrade_result = 13;
+  }
+}
+
+message GenericCtrlResponse {
+  uint64 id = 1;
+  GenericCtrlStatus status = 2;
+  // status != OK 时的人类可读原因
+  string error = 3;
+  oneof body {
+    GenericCtrlHello hello = 10;
+    GenericCtrlNotifyAck notify = 11;
+    GenericCtrlUpgradeAck upgrade = 12;
+  }
+}
+
+// 能力握手：会话建立后探测对端通用通道支持度与运行环境
+message GenericCtrlHello {
+  // 已实现指令名（= oneof 变体名小写）
+  repeated string methods = 1;
+  string agent_version = 2;
+  // linux/windows/macos（std::env::consts::OS）
+  string os = 3;
+  // x86_64/aarch64/...（std::env::consts::ARCH）
+  string arch = 4;
+}
+
+// 平台通知：服务器向网络内节点下发并显示
+message GenericCtrlNotify {
+  // info | warning | important（未知值按 info 展示，扩展不动 proto）
+  string level = 1;
+  string title = 2;
+  string body = 3;
+}
+
+message GenericCtrlNotifyAck {}
+
+// 远程升级指令：节点先回 accepted 应答，再异步执行下载/校验/替换/重启
+message GenericCtrlUpgrade {
+  // 目标版本（如 2.0.11）
+  string version = 1;
+  // 制品下载地址（含一次性 token）
+  string url = 2;
+  // 制品 SHA-256（经加密控制通道传递，是真实性的最终来源）
+  bytes sha256 = 3;
+  // 制品字节数
+  uint64 size = 4;
+  string filename = 5;
+}
+
+message GenericCtrlUpgradeAck {
+  // 已接受并即将执行（false = 拒绝，原因在信封 error）
+  bool accepted = 1;
+}
+
+// 升级结果回执：节点重启后比对标记文件上报
+message GenericCtrlUpgradeResult {
+  bool success = 1;
+  string from_version = 2;
+  string to_version = 3;
+  string error = 4;
+}

@@ -252,6 +252,34 @@ impl ServerTurnInboundHandler {
                     .update_subnet_snapshot(self.server_id, response);
                 self.refresh_automatic_subnet_routes(network_addr.ip);
             }
+            MsgType::GenericCtrlReq => {
+                let request = crate::protocol::generic_ctrl::GenericCtrlRequest::from_slice(
+                    net_packet.payload(),
+                )?;
+                let response = crate::tunnel_core::server::generic_ctrl::dispatch_request(
+                    request,
+                    &self.app_state,
+                )
+                .await;
+                let payload = response.encode();
+                let mut packet =
+                    NetPacket::new(TransmissionBytes::zeroed(HEAD_LENGTH + payload.len()))?;
+                packet.set_msg_type(MsgType::GenericCtrlRes);
+                packet.set_gateway_flag(true);
+                packet.set_ttl(1);
+                packet.set_src_id(network_addr.ip.into());
+                packet.set_dest_id(src.into());
+                packet.set_payload(&payload)?;
+                transport_client.send_turn(packet).await?;
+            }
+            MsgType::GenericCtrlRes => {
+                let response = crate::protocol::generic_ctrl::GenericCtrlResponse::from_slice(
+                    net_packet.payload(),
+                )?;
+                // 待决表按 id 唤醒；无人等待（发后即弃的上报）则忽略
+                crate::tunnel_core::server::generic_ctrl::GenericCtrlNotifier::global()
+                    .notify_response(response);
+            }
             MsgType::SubscriptionConfigPush => {
                 if !self.subscription_verified.load(Ordering::Acquire) {
                     let now = crate::utils::time::now_ts_ms();

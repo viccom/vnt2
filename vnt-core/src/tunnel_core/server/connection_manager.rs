@@ -555,6 +555,11 @@ impl ServerTurnManager {
         data_handler: &ServerTurnInboundHandler,
     ) -> anyhow::Result<()> {
         let mut time = crate::utils::time::now_ts_ms();
+        // 升级重启后首次连上服务器：上报升级结果（发后即清标记，见函数注释）
+        crate::tunnel_core::server::generic_ctrl::report_pending_upgrade_result(
+            &mut self.transport_client,
+        )
+        .await;
         let mut ping_interval = tokio::time::interval(Duration::from_secs(5));
         let mut subnet_sync_interval = tokio::time::interval_at(
             tokio::time::Instant::now() + Duration::from_secs(10),

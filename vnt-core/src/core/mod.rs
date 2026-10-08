@@ -641,6 +641,11 @@ impl NetworkManager {
             );
         }
 
+        // 清理上次升级可能遗留的暂存/备份文件（见 upgrade::cleanup_stale_files）
+        if let Ok(exe) = std::env::current_exe() {
+            crate::upgrade::cleanup_stale_files(&exe);
+        }
+
         // Start data handling tasks for all servers
         for (server_id, turn_manager) in ctx.server_managers.drain(..).enumerate() {
             let handler_config = Box::new(InboundHandlerConfig {

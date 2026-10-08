@@ -120,6 +120,8 @@ pub enum MsgType {
     DestinationUnreachable = 30,
     SubscriptionConfigPush = 31,
     SubscriptionConfigAck = 32,
+    GenericCtrlReq = 33,
+    GenericCtrlRes = 34,
 }
 impl From<MsgType> for u8 {
     fn from(val: MsgType) -> Self {
@@ -165,6 +167,8 @@ impl TryFrom<u8> for MsgType {
             30 => MsgType::DestinationUnreachable,
             31 => MsgType::SubscriptionConfigPush,
             32 => MsgType::SubscriptionConfigAck,
+            33 => MsgType::GenericCtrlReq,
+            34 => MsgType::GenericCtrlRes,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -372,6 +376,8 @@ mod tests {
             MsgType::DestinationUnreachable,
             MsgType::SubscriptionConfigPush,
             MsgType::SubscriptionConfigAck,
+            MsgType::GenericCtrlReq,
+            MsgType::GenericCtrlRes,
         ];
         for msg_type in all {
             let byte = u8::from(msg_type);
@@ -386,7 +392,7 @@ mod tests {
         assert!(MsgType::try_from(18u8).is_err());
         assert!(MsgType::try_from(19u8).is_err());
         assert!(MsgType::try_from(28u8).is_err());
-        assert!(MsgType::try_from(33u8).is_err());
+        assert!(MsgType::try_from(35u8).is_err());
     }
 
     #[test]

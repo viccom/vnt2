@@ -15,6 +15,7 @@ mod system_subnet_routes;
 pub mod tls;
 pub(crate) mod tun;
 pub mod tunnel_core;
+pub mod upgrade;
 pub mod utils;
 
 pub mod api;

@@ -312,6 +312,39 @@ pub(crate) struct AppState {
     managed_config_hashes: Arc<Mutex<HashMap<u64, Vec<u8>>>>,
     managed_config_notify: Arc<tokio::sync::Notify>,
     managed_config_closed: Arc<AtomicBool>,
+    /// 平台通知环形缓冲（GenericCtrl notify 落点；web 展示面后补，见计划 §7）
+    pub(crate) platform_notifications: Arc<Mutex<VecDeque<PlatformNotification>>>,
+}
+
+/// 平台下发的通知（GenericCtrl::Notify 的展示态）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlatformNotification {
+    /// info | warning | important（未知值按 info 展示）
+    pub level: String,
+    pub title: String,
+    pub body: String,
+    /// 接收时间（毫秒时间戳）
+    pub received_at: i64,
+}
+
+/// 通知缓冲保留条数：展示用途，无需无限增长
+const PLATFORM_NOTIFICATION_CAPACITY: usize = 50;
+
+impl AppState {
+    /// 记录一条平台通知（环形缓冲，超容量丢最旧）
+    pub(crate) fn push_platform_notification(&self, notification: PlatformNotification) {
+        let mut queue = self.platform_notifications.lock();
+        queue.push_back(notification);
+        while queue.len() > PLATFORM_NOTIFICATION_CAPACITY {
+            queue.pop_front();
+        }
+    }
+
+    /// web 展示面后补（service_http.rs 冻结期间）；缓冲写入已就位
+    #[allow(dead_code)]
+    pub(crate) fn platform_notifications_snapshot(&self) -> Vec<PlatformNotification> {
+        self.platform_notifications.lock().iter().cloned().collect()
+    }
 }
 
 /// A local P2P transport listener that was successfully bound at startup.

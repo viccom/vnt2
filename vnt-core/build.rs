@@ -13,6 +13,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     config.protoc_arg("--experimental_allow_proto3_optional");
+    // 生成枚举变体共享 GenericCtrl 前缀是协议语义（状态码族），非命名缺陷
+    config.type_attribute(
+        "protocol.generic_ctrl.GenericCtrlStatus",
+        "#[allow(clippy::enum_variant_names)]",
+    );
     // Keep selective-broadcast payloads reference counted. This avoids building an
     // intermediate Vec for every broadcast and lets decoding from `Bytes` retain a
     // slice of the received frame instead of copying the embedded packet.
@@ -24,6 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "proto/rpc.proto",
             "proto/client.proto",
             "proto/fec.proto",
+            "proto/generic_ctrl.proto",
         ],
         &["proto"],
     )?;
