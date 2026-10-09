@@ -31,7 +31,33 @@
 | GET | `/api/instance/config` | query `file_name` | 运行中实例的**生效配置** TOML 文本（本地配置与服务端下发合并后的只读快照；读快照而非实时锁，避免阻塞监测循环） |
 | GET | `/api/notifications` | 无 | 平台通知聚合（跨实例，无 `file_name`）：`[{file_name, level, title, body, received_at}]`，按 `received_at` 倒序、并列按实例名稳定排序。来源 GenericCtrl notify 环形缓冲（每实例最近 50 条，**会话级：实例停止即丢失**）；前端角标轮询（15s）展示 |
 
-`status` 取值（`VntStatus`）：`Stopped` / `Starting` / `Running`。
+`status` 取值（`VntStatus`，**实际序列化为小写**，service_http.rs `rename_all = "lowercase"`）：`stopped` / `starting` / `running`。
+
+## 二补、vnt2_web 子命令（busybox CLI）
+
+`vnt2_web` 单二进制同时提供服务模式与 HTTP 管理子命令：argv 首个裸词命中白名单
+（`config start stop restart status info peers routes`）则进入 CLI 模式，经 HTTP
+调用本机服务进程（默认 `127.0.0.1:19099`）；否则走服务模式（`--addr/--token/
+--conf/--desktop_config/--service` 等 flag 打头的调用形态零影响）。
+
+```
+vnt2_web config add <名> --from-file <路径>      # TOML 文件导入
+vnt2_web config add <名> --subscription <码>     # 订阅码：preview 打印
+                                                 # server/network_code/device_id/revision 后落盘
+vnt2_web config list | show <名> | delete <名> --yes
+vnt2_web start|stop|restart|status <名>
+vnt2_web info|peers|routes <名>
+vnt2_web [--addr host:port] [--token <令牌>] <子命令>   # flag 可前置
+```
+
+- **鉴权**：CLI 与服务同 API。loopback 来源默认免 token（`--auth-strict` 或
+  `VNT_WEB_AUTH_STRICT` 退回全量 Bearer）；token 优先序 `--token` >
+  `VNT_WEB_TOKEN` env > 无（loopback 免 token 时无需）。
+- **幂等**：`start` 对「正在启动或已运行」视为成功并打印当前状态；`stop` 对
+  已停止实例视为成功；`peers/routes` 对未运行实例输出「实例未运行」退出码 0。
+- **轮询**：`start` 后轮询 `/api/start/status` 到终态（默认 1s/30s，
+  `VNT_WEBCTL_POLL_INTERVAL_MS/TIMEOUT_MS` 可注入）。
+- 子命令 CLI 实现在独立 crate `vnt-webctl`（workspace 成员）。
 
 ## 三、运行时遥测
 

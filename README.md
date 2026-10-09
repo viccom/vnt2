@@ -15,6 +15,8 @@ NAS、跨地区协作等场景。
   - P2P 状态周期上报，配合 vnts2 增强服务端的拓扑视图：直连链路明细（连接模型 / RTT）、已验证节点中继路由（gossip 两跳）、按对端端到端流量快照（本次网络会话累计，拓扑边悬停展示）
   - 通用控制信令 GenericCtrl（MsgType 33/34）：能力握手、服务端平台通知推送、在线自升级（Windows / Unix）与升级结果回报
   - vnt2_web `/peers` 页面显示准确连接模型（直连 / 打洞直连 tcp-v4·tcp-v6·udp-v4·udp-v6 / 中继转发）
+  - vnt2_web 平台通知角标（GenericCtrl notify 展示：头部铃铛 + 未读计数 + 面板查看时间/等级/内容）
+  - vnt2_web 管理子命令（busybox CLI）：`config add --subscription <码>` 一串订阅码完成配置、`config list/show/delete`、`start/stop/restart/status`、`info/peers/routes` 遥测；本机 loopback 免 token（`--auth-strict` 退回全量鉴权），详见 [docs/web-api.md](docs/web-api.md) 二补节
   - 组网密码框禁用浏览器自动填充，订阅模式显示"本地将保存"的配置预览
 
 # 快速开始

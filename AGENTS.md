@@ -48,11 +48,12 @@ pnpm build:web    # 根目录执行 = pnpm --filter vnt-web-ui build
 | `vnt-core` | 内核：tun、加解密、打洞、FEC、NAT、路由、远程升级执行器（api / tunnel_core / nat / fec / crypto / port_mapping / upgrade …） |
 | `vnt-web` | `vnt2_web` 后端：axum HTTP 服务（service_http.rs，/api/peers、/api/config、/api/start …）+ `ui/` 前端 |
 | `vnt-ipc` | vnt2_cli ↔ vnt2_ctrl 的进程间通信 |
+| `vnt-webctl` | vnt2_web 管理子命令 CLI 库（busybox 派发；HTTP 打本机服务，main_web.rs 顶部按首个裸词白名单分流） |
 | `vnt-jni` | Android JNI 绑定 |
 | `vnt-desktop/` | Tauri 桌面客户端（src-tauri） |
 | 根 `src/` | 三个 bin 入口（main_cli / main_ctrl / main_web）+ 参数、订阅接入、web 服务装配 |
 
-`vnt2_web` 本地 API 监听 `--addr` 指定地址（默认 `127.0.0.1:19099`），凭 `--token` 或环境变量 `VNT_WEB_TOKEN` 鉴权；`/api/peers` 的 `mode` 字段为连接模型（lan / udp-v4 / udp-v6 / tcp-v4 / tcp-v6 / relay）。 全部接口清单与响应结构见 [docs/web-api.md](docs/web-api.md)（事实源 `vnt-web/src/service_http.rs` 的 `api_router`，改路由/字段须同步该手册）。
+`vnt2_web` 本地 API 监听 `--addr` 指定地址（默认 `127.0.0.1:19099`），凭 `--token` 或环境变量 `VNT_WEB_TOKEN` 鉴权；**loopback 来源默认免 token**（`--auth-strict` / `VNT_WEB_AUTH_STRICT` 退回全量 Bearer，判定只信连接对端 ConnectInfo、不读 X-Forwarded-For）；`/api/peers` 的 `mode` 字段为连接模型（lan / udp-v4 / udp-v6 / tcp-v4 / tcp-v6 / relay）。管理子命令（busybox：`config add --subscription` 等）与全部接口清单见 [docs/web-api.md](docs/web-api.md)（事实源 `vnt-web/src/service_http.rs` 的 `api_router`，改路由/字段须同步该手册）。
 
 ## 硬约束（违反即错误）
 
