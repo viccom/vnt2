@@ -61,15 +61,24 @@ fn fetch_config_list(client: &WebClient) -> anyhow::Result<Vec<(String, String)>
 }
 
 /// 实例名解析：API 实例查找主键是 file_name（网页保存的可能是无语义时间戳
-/// 名），用户心智模型是 config_name——先按规范化 file_name 精确匹配，再按
-/// config_name 别名匹配；无匹配透传规范化名（让服务端报它的原错误，维持
-/// 既有语义）；config_name 重名歧义则报错列出候选。
+/// 名），用户心智模型是 config_name——先按规范化 file_name 精确匹配，
+/// **零命中才**按 config_name 别名匹配（两阶段：file_name 精确命中无条件
+/// 胜出，不受他配置 config_name 同名的交叉干扰）；别名阶段多重命中报歧义；
+/// 全无匹配透传规范化名（让服务端报它的原错误，维持既有语义）。
 pub fn resolve_instance_name(client: &WebClient, raw: &str) -> anyhow::Result<String> {
     let normalized = normalize_config_name(raw).map_err(anyhow::Error::msg)?;
     let entries = fetch_config_list(client)?;
+    // 阶段一：file_name 精确匹配（file_name 唯一，无需歧义分支）
+    if let Some((file_name, _)) = entries
+        .iter()
+        .find(|(file_name, _)| file_name == &normalized)
+    {
+        return Ok(file_name.clone());
+    }
+    // 阶段二：config_name 别名（可能重复，多重命中须报歧义）
     let hits: Vec<&str> = entries
         .iter()
-        .filter(|(file_name, config_name)| file_name == &normalized || config_name == raw)
+        .filter(|(_, config_name)| config_name == raw)
         .map(|(file_name, _)| file_name.as_str())
         .collect();
     match hits.len() {

@@ -185,3 +185,24 @@ fn info_command_uses_resolved_file_name() {
         "须以解析后的 file_name 查询，实际请求: {requests:?}"
     );
 }
+
+/// 交叉匹配：A 的 file_name 恰为 B 的 config_name 时，file_name 精确命中
+/// 必须胜出，不得误报歧义（8009401 审查发现的语义缺陷）
+#[test]
+fn exact_file_name_beats_cross_config_name_match() {
+    let server = spawn_server(|request_line| {
+        if request_line.starts_with("GET /api/config/list ") {
+            ok_envelope(
+                r#"[{"file_name":"metme.toml","config_name":"1791428521875"},{"file_name":"1791428521875.toml","config_name":"metme"}]"#,
+            )
+        } else {
+            ok_envelope("null")
+        }
+    });
+    let client = WebClient::new(&server.base, None).unwrap();
+    let resolved = resolve_instance_name(&client, "metme").unwrap();
+    assert_eq!(
+        resolved, "metme.toml",
+        "file_name 精确命中须无条件胜出，不受他配置 config_name 同名影响"
+    );
+}
