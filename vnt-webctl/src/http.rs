@@ -85,6 +85,10 @@ impl WebClient {
             return Err(invalid());
         };
         let base = with_scheme.trim_end_matches('/').to_string();
+        // 与 vnt-core 同 crate 图时 reqwest 走 rustls-no-provider：
+        // 构建 client 前确保进程内已安装默认 CryptoProvider（已安装则忽略冲突，
+        // 同 vnt-core/src/utils/http_get.rs 的既有惯例）。
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Ok(Self {
             base,
             token,

@@ -11,3 +11,6 @@ serde_json.workspace = true
 # 阻塞客户端即可：CLI 为短命进程，不引入 async 运行时；
 # default-features = false 保持 http-only（vnt-web 的 axum 已把 hyper 带进树）
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json"] }
+# 与 vnt-core 同 crate 图时 reqwest 被统一到 rustls-no-provider：
+# 客户端构建前须安装 ring CryptoProvider（见 http.rs WebClient::new）
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

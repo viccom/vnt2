@@ -80,10 +80,86 @@ impl DesktopKernelConfig {
     }
 }
 
+/// CLI 子命令白名单（裸词精确匹配；`--xxx` flag 永不误入，
+/// 计划 §4 Task 6）。`serve` 故意不注册为子命令、但列入白名单——让它被
+/// 误派发到 CLI 侧报「未知子命令」而非静默走服务模式，防歧义。
+const CLI_SUBCOMMANDS: &[&str] = &[
+    "config", "start", "stop", "restart", "status", "info", "peers", "routes", "help", "serve",
+];
+
 fn main() {
+    // 派发必须在 Args::parse() 之前：clap 遇未知裸词（如 `config`）会直接
+    // 报错退出（计划 §4 Task 6 复核钉死）。服务模式派生入口共 4 处、均以
+    // `--flag` 打头（计划 §1 论断 2），故首个裸词即 CLI 子命令候选；
+    // 带值 flag（--addr/--token/--conf/--desktop_config）的值须跳过，
+    // 防 `--conf config` 之类值与白名单词相撞。
+    if let Some(subcommand) = first_bare_word() {
+        if CLI_SUBCOMMANDS.contains(&subcommand.as_str()) {
+            std::process::exit(run_cli_mode());
+        }
+    }
     if let Err(error) = run() {
         eprintln!("{error:#}");
         std::process::exit(1);
+    }
+}
+
+/// 服务模式带值 flag（其后的 argv 项是值、不是子命令候选）。
+/// `--service`（windows）是 bool flag 不带值，不在此列。
+const VALUE_FLAGS: &[&str] = &["--addr", "--token", "--conf", "--desktop_config"];
+
+/// 首个裸词（非 `--flag`、非带值 flag 的值）；无则 None（纯 flag 的服务模式）。
+fn first_bare_word() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if VALUE_FLAGS.contains(&arg.as_str()) {
+            args.next(); // 跳过 flag 值
+        } else if !arg.starts_with('-') {
+            return Some(arg);
+        }
+        // `--flag=value` 与 bool flag：无后续值可跳
+    }
+    None
+}
+
+/// CLI 模式：从原始 argv 解析 `--addr`/`--token`（与服务模式同 flag 名），
+/// 其余参数原样交 vnt-webctl。`--addr` 默认与服务模式默认绑定一致。
+fn run_cli_mode() -> i32 {
+    let mut base = "127.0.0.1:19099".to_string();
+    let mut token: Option<String> = None;
+    let mut cli_args: Vec<String> = vec!["vnt2_web".to_string()];
+    let mut rest = std::env::args().skip(1).peekable();
+    while let Some(arg) = rest.next() {
+        if arg == "--addr" {
+            match rest.next() {
+                Some(value) => base = value,
+                None => {
+                    eprintln!("--addr 缺少参数值");
+                    return 1;
+                }
+            }
+        } else if let Some(value) = arg.strip_prefix("--addr=") {
+            base = value.to_string();
+        } else if arg == "--token" {
+            match rest.next() {
+                Some(value) => token = Some(value),
+                None => {
+                    eprintln!("--token 缺少参数值");
+                    return 1;
+                }
+            }
+        } else if let Some(value) = arg.strip_prefix("--token=") {
+            token = Some(value.to_string());
+        } else {
+            cli_args.push(arg);
+        }
+    }
+    match vnt_webctl::run_cli(cli_args.into_iter(), &base, token.as_deref()) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("{error:#}");
+            1
+        }
     }
 }
 
