@@ -7,6 +7,8 @@ use clap::{Parser, Subcommand};
 
 pub mod config;
 pub mod lifecycle;
+pub mod render;
+pub mod telemetry;
 
 #[derive(Parser, Debug)]
 #[command(name = "vnt2_web", about = "vnt2_web 管理子命令", version)]
@@ -79,7 +81,7 @@ pub fn run_cli(
         | Command::Restart { .. }
         | Command::Status { .. } => lifecycle::dispatch(&cli, base, token)?,
         Command::Info { .. } | Command::Peers { .. } | Command::Routes { .. } => {
-            anyhow::bail!("子命令尚未实现")
+            telemetry::dispatch(&cli, base, token)?
         }
     }
     Ok(0)
