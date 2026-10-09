@@ -9,7 +9,8 @@ fn parse_err(args: &[&str]) -> String {
     let args: Vec<String> = std::iter::once("vnt2_web".to_string())
         .chain(args.iter().map(|s| s.to_string()))
         .collect();
-    run_cli(args.into_iter())
+    // base 无监听端口即可：解析失败路径不会发起 HTTP 请求
+    run_cli(args.into_iter(), "http://127.0.0.1:1", None)
         .expect_err("非法参数必须返回解析错误")
         .to_string()
 }

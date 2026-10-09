@@ -1,9 +1,11 @@
 //! vnt2_web 的管理子命令 CLI（busybox 派发入口）。
 //!
-//! 库自身不 `exit()`：`run_cli` 只解析参数并返回退出码占位，
-//! 由 main_web 映射为进程退出码（计划 §4 Task 1 / Task 6）。
+//! 库自身不 `exit()`：`run_cli` 解析参数并派发子命令，
+//! 由 main_web 把返回码映射为进程退出码（计划 §4 Task 1 / Task 6）。
 
 use clap::{Parser, Subcommand};
+
+pub mod config;
 
 #[derive(Parser, Debug)]
 #[command(name = "vnt2_web", about = "vnt2_web 管理子命令", version)]
@@ -60,8 +62,15 @@ pub enum ConfigAction {
     },
 }
 
-/// 解析参数并返回退出码占位（本任务仅骨架，解析成功即返回 0）。
-pub fn run_cli(args: impl Iterator<Item = String>) -> anyhow::Result<i32> {
-    let _cli = Cli::try_parse_from(args)?;
+/// 解析参数并派发子命令；成功返回退出码 0。
+/// `base` 为服务地址（如 `http://127.0.0.1:19099`），`token` 为可选 Bearer 令牌
+/// （Task 6 由 main_web 接线传入）。
+pub fn run_cli(
+    args: impl Iterator<Item = String>,
+    base: &str,
+    token: Option<&str>,
+) -> anyhow::Result<i32> {
+    let cli = Cli::try_parse_from(args)?;
+    config::dispatch(&cli, base, token)?;
     Ok(0)
 }
