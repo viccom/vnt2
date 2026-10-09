@@ -1,0 +1,13 @@
+[package]
+name = "vnt-webctl"
+version = "2.0.10"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+anyhow.workspace = true
+serde_json.workspace = true
+# 阻塞客户端即可：CLI 为短命进程，不引入 async 运行时；
+# default-features = false 保持 http-only（vnt-web 的 axum 已把 hyper 带进树）
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json"] }

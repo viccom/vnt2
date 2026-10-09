@@ -7,6 +7,7 @@ license = "Apache-2.0"
 [dependencies]
 vnt-ipc = { path = "vnt-ipc", optional = true }
 vnt-web = { path = "vnt-web", optional = true }
+vnt-webctl = { path = "vnt-webctl", optional = true }
 clap = { version = "4.5", features = ["derive", "env"] }
 
 tokio = { workspace = true, features = ["full"] }
@@ -29,7 +30,7 @@ windows-service.workspace = true
 [features]
 default = []
 vnt-ipc = ["dep:vnt-ipc"]
-vnt-web = ["dep:vnt-web"]
+vnt-web = ["dep:vnt-web", "dep:vnt-webctl"]
 
 [[bin]]
 name = "vnt2_cli"
@@ -47,7 +48,7 @@ path = "src/main_web.rs"
 required-features = ["vnt-web"]
 
 [workspace]
-members = ["vnt-web", "vnt-ipc", "vnt-core", "vnt-jni", "vnt-desktop/src-tauri"]
+members = ["vnt-web", "vnt-webctl", "vnt-ipc", "vnt-core", "vnt-jni", "vnt-desktop/src-tauri"]
 
 [workspace.dependencies]
 vnt-core = { path = "vnt-core" }
