@@ -1,6 +1,6 @@
 mod service_http;
 
-pub use service_http::{VntService, generate_access_token, run_http_server};
+pub use service_http::{AuthConfig, VntService, generate_access_token, run_http_server};
 
 struct ScopeGuard<F: FnOnce()>(Option<F>);
 

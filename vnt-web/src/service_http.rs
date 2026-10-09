@@ -1,6 +1,11 @@
 use crate::defer;
 use anyhow::{Context, anyhow, bail};
 use axum::body::{Body, to_bytes};
+use axum::extract::FromRequestParts;
+use axum::extract::connect_info::ConnectInfo;
+#[cfg(test)]
+use axum::extract::connect_info::MockConnectInfo;
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::IntoResponse;
 use axum::{
@@ -1182,17 +1187,22 @@ impl VntService {
     pub async fn start_http(
         &self,
         addr: SocketAddr,
-        token: String,
+        auth: AuthConfig,
         cancellation: CancellationToken,
     ) -> anyhow::Result<tokio::task::JoinHandle<anyhow::Result<()>>> {
         let listener = TcpListener::bind(addr).await?;
         let actual_addr = listener.local_addr()?;
-        let app = http_router(self.router.clone(), token);
+        let app = http_router(self.router.clone(), auth);
         log::info!("HTTP API Listening on http://{}", actual_addr);
         Ok(tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(cancellation.cancelled_owned())
-                .await?;
+            // into_make_service_with_connect_info 必须：middleware 的
+            // ConnectInfo<SocketAddr> extractor 靠它注入连接对端（计划 §3 陷阱 1）
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(cancellation.cancelled_owned())
+            .await?;
             Ok(())
         }))
     }
@@ -1237,18 +1247,44 @@ fn api_router(state: HttpAppState, runtime: ServiceRuntime) -> Router {
         .with_state(state)
 }
 
+/// Web API 鉴权配置（计划 §3）。token 由服务端组装（显式 --token / 桌面配置 /
+/// 随机生成统一入口），strict 由 CLI 层（--auth-strict / VNT_WEB_AUTH_STRICT）
+/// 解析后传入——本库不感知 flag/env。
+#[derive(Clone)]
+pub struct AuthConfig {
+    token: String,
+    /// true 时强制 Bearer 鉴权（含 loopback）；false 时 loopback 来源免 token
+    strict: bool,
+}
+
+impl AuthConfig {
+    pub fn new(token: String, strict: bool) -> Self {
+        Self { token, strict }
+    }
+}
+
+/// 判定次序（计划 §3）：
+/// 1. Bearer 比对通过 → 放行（任何来源，向后兼容）
+/// 2. !strict 且连接对端为 loopback → 放行（免 token 场景）
+/// 3. 否则 401
+///
+/// 来源判定只信连接对端（ConnectInfo），绝不读 X-Forwarded-For（论断 B）。
+/// ConnectInfo 为 None 只发生在 oneshot 等无连接对端的测试/进程内调用路径，
+/// 此路径此前无鉴权（裸 api_router），保持不放行语义即维持旧行为。
 async fn token_auth_middleware(
-    State(token): State<String>,
+    State(auth): State<AuthConfig>,
+    MaybeConnectInfo(peer): MaybeConnectInfo,
     req: Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let authorized = req
+    let bearer_ok = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|provided| provided == token);
-    if !authorized {
+        .is_some_and(|provided| provided == auth.token);
+    let loopback_exempt = !auth.strict && peer.is_some_and(|addr| addr.ip().is_loopback());
+    if !bearer_ok && !loopback_exempt {
         return (
             StatusCode::UNAUTHORIZED,
             Json(ApiResponse::<()>::error("访问令牌无效或已过期")),
@@ -1258,13 +1294,47 @@ async fn token_auth_middleware(
     next.run(req).await
 }
 
-fn http_router(api: Router, token: String) -> Router {
+/// 可选的连接对端地址。axum 0.8 的 `ConnectInfo` 未实现
+/// `OptionalFromRequestParts`（只有 `Extension` 有），`from_fn` 又只接受
+/// `FromRequestParts`（无 `Option<T>` 兜底），故用此包装经可选的
+/// `Extension<ConnectInfo<SocketAddr>>` 取值。
+struct MaybeConnectInfo(Option<SocketAddr>);
+
+impl<S> FromRequestParts<S> for MaybeConnectInfo
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        if let Some(addr) =
+            Option::<axum::Extension<ConnectInfo<SocketAddr>>>::from_request_parts(parts, state)
+                .await?
+                .map(|axum::Extension(ConnectInfo(addr))| addr)
+        {
+            return Ok(Self(Some(addr)));
+        }
+        // 测试路径：MockConnectInfo 只插入自身类型，不复用 ConnectInfo 槽位
+        // （axum 官方 ConnectInfo extractor 用同样的兜底）
+        #[cfg(test)]
+        if let Some(addr) = parts
+            .extensions
+            .get::<MockConnectInfo<SocketAddr>>()
+            .map(|MockConnectInfo(addr)| *addr)
+        {
+            return Ok(Self(Some(addr)));
+        }
+        Ok(Self(None))
+    }
+}
+
+fn http_router(api: Router, auth: AuthConfig) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
     Router::new()
-        .merge(api.layer(middleware::from_fn_with_state(token, token_auth_middleware)))
+        .merge(api.layer(middleware::from_fn_with_state(auth, token_auth_middleware)))
         .fallback(static_handler)
         .layer(cors)
         .layer(middleware::from_fn(logging_middleware))
@@ -1273,13 +1343,11 @@ fn http_router(api: Router, token: String) -> Router {
 pub async fn run_http_server(
     addr: SocketAddr,
     start_config_file_name: Option<PathBuf>,
-    token: String,
+    auth: AuthConfig,
 ) -> anyhow::Result<()> {
     let service = VntService::new(start_config_file_name).await?;
     let cancellation = CancellationToken::new();
-    let handle = service
-        .start_http(addr, token, cancellation.clone())
-        .await?;
+    let handle = service.start_http(addr, auth, cancellation.clone()).await?;
     let shutdown_result = shutdown_signal().await;
     cancellation.cancel();
     handle.await??;
@@ -3145,7 +3213,7 @@ config_name = "local-label"
         let token = "test-token-with-enough-entropy".to_string();
         let app = http_router(
             api_router(new_test_state(), ServiceRuntime::StandaloneWeb),
-            token.clone(),
+            AuthConfig::new(token.clone(), true),
         );
         let unauthorized = app
             .clone()
@@ -3170,6 +3238,97 @@ config_name = "local-label"
             .await
             .unwrap();
         assert_eq!(authorized.status(), StatusCode::OK);
+    }
+
+    /// loopback 免 token（计划 §3）：非 strict 模式下，连接对端为 loopback
+    /// 时无需 Bearer 即可访问 API。用 MockConnectInfo 模拟连接对端地址
+    /// （axum 官方测试惯例），端到端 ConnectInfo 注入由冒烟与真实部署覆盖。
+    #[tokio::test]
+    async fn loopback_without_token_is_allowed_when_not_strict() {
+        let app = http_router(
+            api_router(new_test_state(), ServiceRuntime::StandaloneWeb),
+            AuthConfig::new("test-token-with-enough-entropy".to_string(), false),
+        )
+        .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/version")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// strict 模式关闭 loopback 免 token：无 Bearer 一律 401
+    #[tokio::test]
+    async fn loopback_without_token_is_rejected_when_strict() {
+        let app = http_router(
+            api_router(new_test_state(), ServiceRuntime::StandaloneWeb),
+            AuthConfig::new("test-token-with-enough-entropy".to_string(), true),
+        )
+        .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/version")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Bearer 优先于 strict：strict 下带正确 token 的 loopback 请求仍放行（向后兼容）
+    #[tokio::test]
+    async fn loopback_with_token_is_allowed_when_strict() {
+        let token = "test-token-with-enough-entropy".to_string();
+        let app = http_router(
+            api_router(new_test_state(), ServiceRuntime::StandaloneWeb),
+            AuthConfig::new(token.clone(), true),
+        )
+        .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/version")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// 免 token 不扩到非 loopback：非 strict 下远端来源无 Bearer 仍 401
+    #[tokio::test]
+    async fn non_loopback_without_token_is_rejected_when_not_strict() {
+        let app = http_router(
+            api_router(new_test_state(), ServiceRuntime::StandaloneWeb),
+            AuthConfig::new("test-token-with-enough-entropy".to_string(), false),
+        )
+        .layer(MockConnectInfo(SocketAddr::from((
+            [192, 168, 1, 10],
+            12345,
+        ))));
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/version")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

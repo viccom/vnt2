@@ -23,6 +23,10 @@ pub(crate) struct Args {
     /// Web API 访问令牌；未指定时会生成随机令牌并输出到日志。
     #[arg(long, env = "VNT_WEB_TOKEN")]
     token: Option<String>,
+    /// 强制所有来源（含 loopback）必须携带 Bearer 令牌；
+    /// 默认关闭，即本机 loopback 来源免 token。
+    #[arg(long, env = "VNT_WEB_AUTH_STRICT")]
+    auth_strict: bool,
     /// 读取桌面端保存的内核设置。
     #[arg(long, hide = true)]
     desktop_config: Option<PathBuf>,
@@ -218,9 +222,8 @@ pub(crate) async fn run_server(
 
     let service = vnt_web::VntService::new(args.conf).await?;
     let cancellation = CancellationToken::new();
-    let handle = service
-        .start_http(addr, token, cancellation.clone())
-        .await?;
+    let auth = vnt_web::AuthConfig::new(token, args.auth_strict);
+    let handle = service.start_http(addr, auth, cancellation.clone()).await?;
 
     if let Some(service_cancellation) = service_cancellation {
         service_cancellation.cancelled().await;
