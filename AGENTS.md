@@ -52,7 +52,7 @@ pnpm build:web    # 根目录执行 = pnpm --filter vnt-web-ui build
 | `vnt-desktop/` | Tauri 桌面客户端（src-tauri） |
 | 根 `src/` | 三个 bin 入口（main_cli / main_ctrl / main_web）+ 参数、订阅接入、web 服务装配 |
 
-`vnt2_web` 本地 API 监听 `--addr` 指定地址（默认 `127.0.0.1:19099`），凭 `--token` 或环境变量 `VNT_WEB_TOKEN` 鉴权；`/api/peers` 的 `mode` 字段为连接模型（lan / udp-v4 / udp-v6 / tcp-v4 / tcp-v6 / relay）。
+`vnt2_web` 本地 API 监听 `--addr` 指定地址（默认 `127.0.0.1:19099`），凭 `--token` 或环境变量 `VNT_WEB_TOKEN` 鉴权；`/api/peers` 的 `mode` 字段为连接模型（lan / udp-v4 / udp-v6 / tcp-v4 / tcp-v6 / relay）。 全部接口清单与响应结构见 [docs/web-api.md](docs/web-api.md)（事实源 `vnt-web/src/service_http.rs` 的 `api_router`，改路由/字段须同步该手册）。
 
 ## 硬约束（违反即错误）
 
