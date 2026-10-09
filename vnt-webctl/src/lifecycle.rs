@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail};
 
 use crate::Cli;
-use crate::config::{http_get, http_post, normalize_config_name, query_escape};
+use crate::config::normalize_config_name;
+use crate::http::{WebClient, query_escape};
 
 /// 连续非终态 code:-1 的容忍上限（Starting 竞态窗口）。
 const MAX_CONSECUTIVE_ERRORS: u32 = 3;
@@ -136,13 +137,8 @@ fn status_path(file_name: &str) -> String {
     format!("/api/start/status?file_name={}", query_escape(file_name))
 }
 
-fn fetch_status(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: Option<&str>,
-    file_name: &str,
-) -> anyhow::Result<PollStatus> {
-    let data = http_get(client, base, &status_path(file_name), token)?;
+fn fetch_status(client: &WebClient, file_name: &str) -> anyhow::Result<PollStatus> {
+    let data = client.get(&status_path(file_name))?;
     Ok(parse_status(&data))
 }
 
@@ -160,9 +156,7 @@ fn status_label(status: PollStatus) -> &'static str {
 /// 每轮打印状态行；Running 成功、Starting 回落 Stopped 报错、超时报错、
 /// 连续非终态 code:-1 达上限报错。返回终态供「已在运行」分支复用输出。
 fn poll_until_terminal(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: Option<&str>,
+    client: &WebClient,
     name: &str,
     file_name: &str,
     config: &PollConfig,
@@ -171,7 +165,7 @@ fn poll_until_terminal(
     let mut saw_starting = false;
     let mut consecutive_errors = 0u32;
     loop {
-        let observed = match fetch_status(client, base, token, file_name) {
+        let observed = match fetch_status(client, file_name) {
             Ok(status) => {
                 consecutive_errors = 0;
                 status
@@ -227,86 +221,59 @@ fn poll_until_terminal(
 /// `start <名>`：POST /api/start 后轮询到终态。
 ///
 /// 已在运行/正在启动（begin_vnt_start 幂等分支）视为成功，打印当前状态。
-pub fn start(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: Option<&str>,
-    name: &str,
-    config: &PollConfig,
-) -> anyhow::Result<()> {
+pub fn start(client: &WebClient, name: &str, config: &PollConfig) -> anyhow::Result<()> {
     let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
     let body = serde_json::json!({ "file_name": file_name });
-    match http_post(client, base, "/api/start", body.clone(), token) {
+    match client.post("/api/start", body.clone()) {
         Ok(_) => {
-            poll_until_terminal(client, base, token, name, &file_name, config)?;
+            poll_until_terminal(client, name, &file_name, config)?;
             Ok(())
         }
         Err(error) if error.to_string().contains(ALREADY_ACTIVE_HINT) => {
             // begin_vnt_start 幂等分支（复核钉死）：已在运行/启动中不算失败
             println!("实例 {name} 已在运行或正在启动");
-            let status =
-                fetch_status(client, base, token, &file_name).context("查询当前状态失败")?;
+            let status = fetch_status(client, &file_name).context("查询当前状态失败")?;
             println!("实例 {name} 状态: {}", status_label(status));
             Ok(())
         }
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     }
 }
 
 /// `stop <名>`：POST /api/stop。已停止实例的 code:-1 "Vnt stopped"
 /// 视为幂等成功；其它 code:-1 原样报错。
-pub fn stop(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: Option<&str>,
-    name: &str,
-) -> anyhow::Result<()> {
+pub fn stop(client: &WebClient, name: &str) -> anyhow::Result<()> {
     let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
     let body = serde_json::json!({ "file_name": file_name });
-    match http_post(client, base, "/api/stop", body, token) {
+    match client.post("/api/stop", body) {
         Ok(_) => println!("已停止实例 {name}"),
         Err(error) if error.to_string().contains(STOPPED_HINT) => {
             println!("实例 {name} 已处于停止状态");
         }
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     }
     Ok(())
 }
 
 /// `restart <名>`：POST /api/restart（服务端异步启动，不回传终态，
 /// 与 web 界面行为一致；观察启动结果用 `status`）。
-pub fn restart(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: Option<&str>,
-    name: &str,
-) -> anyhow::Result<()> {
+pub fn restart(client: &WebClient, name: &str) -> anyhow::Result<()> {
     let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
     let body = serde_json::json!({ "file_name": file_name });
-    http_post(client, base, "/api/restart", body, token)?;
+    client.post("/api/restart", body)?;
     println!("已重启实例 {name}");
     Ok(())
 }
 
 /// `status <名>`：打印状态；Running 时附加 /api/info 关键摘要。
-pub fn status(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: Option<&str>,
-    name: &str,
-) -> anyhow::Result<()> {
+pub fn status(client: &WebClient, name: &str) -> anyhow::Result<()> {
     let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
-    let current = fetch_status(client, base, token, &file_name)?;
+    let current = fetch_status(client, &file_name)?;
     println!("实例 {name} 状态: {}", status_label(current));
     if current != PollStatus::Running {
         return Ok(());
     }
-    let info = http_get(
-        client,
-        base,
-        &format!("/api/info?file_name={}", query_escape(&file_name)),
-        token,
-    )?;
+    let info = client.get(&format!("/api/info?file_name={}", query_escape(&file_name)))?;
     let get_str = |key: &str| {
         info.get(key)
             .and_then(serde_json::Value::as_str)
@@ -327,13 +294,12 @@ pub fn status(
     Ok(())
 }
 
-pub fn dispatch(cli: &Cli, base: &str, token: Option<&str>) -> anyhow::Result<()> {
-    let client = reqwest::blocking::Client::new();
+pub fn dispatch(cli: &Cli, client: &WebClient) -> anyhow::Result<()> {
     match &cli.command {
-        crate::Command::Start { name } => start(&client, base, token, name, &PollConfig::default()),
-        crate::Command::Stop { name } => stop(&client, base, token, name),
-        crate::Command::Restart { name } => restart(&client, base, token, name),
-        crate::Command::Status { name } => status(&client, base, token, name),
+        crate::Command::Start { name } => start(client, name, &PollConfig::default()),
+        crate::Command::Stop { name } => stop(client, name),
+        crate::Command::Restart { name } => restart(client, name),
+        crate::Command::Status { name } => status(client, name),
         _ => bail!("非生命周期子命令"),
     }
 }

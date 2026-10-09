@@ -1,9 +1,11 @@
 //! config 子命令实现（计划 §4 Task 2）。
 //!
-//! HTTP 薄封装本任务内联于此，Task 5 抽出为独立的 http.rs（见函数级 TODO）。
+//! HTTP 调用统一走 [`crate::http::WebClient`]（Task 5 抽出）；
+//! 本模块只留业务逻辑：file_name 规范化、订阅 TOML 模板、三个子命令。
 
 use anyhow::{Context, bail};
 
+use crate::http::{WebClient, query_escape};
 use crate::{Cli, ConfigAction};
 
 /// file_name 预校验与规范化，与服务端 `normalize_config_file_name`
@@ -36,124 +38,24 @@ pub fn subscription_toml(config_name: &str, code: &str) -> String {
     )
 }
 
-// TODO(Task 5): 抽出为 vnt-webctl/src/http.rs 的 WebClient，
-// 统一 WebError 映射（Api/Http/Connect）与 token 优先序。
-// 本任务只需能跑通订阅流程的临时实现。
-/// 解析 `{code,msg,data}` 包裹：code:0 → data，code:-1 → Err(msg)。
-fn unwrap_envelope(value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-    let code = value
-        .get("code")
-        .and_then(serde_json::Value::as_i64)
-        .context("响应缺少 code 字段")?;
-    if code == 0 {
-        Ok(value
-            .get("data")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null))
-    } else {
-        let msg = value
-            .get("msg")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("未知错误");
-        bail!("{msg}")
-    }
-}
-
-/// TODO(Task 5): 并入 WebClient::call。
-pub(crate) fn http_post(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    path: &str,
-    body: serde_json::Value,
-    token: Option<&str>,
-) -> anyhow::Result<serde_json::Value> {
-    let url = format!("{}{}", base.trim_end_matches('/'), path);
-    let mut request = client.post(url).json(&body);
-    if let Some(token) = token {
-        request = request.bearer_auth(token);
-    }
-    let response = request.send().context("服务未运行或无法连接")?;
-    let value = response
-        .json::<serde_json::Value>()
-        .context("响应不是合法 JSON")?;
-    unwrap_envelope(value)
-}
-
-/// TODO(Task 5): 并入 WebClient::call。
-pub(crate) fn http_get(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    path_and_query: &str,
-    token: Option<&str>,
-) -> anyhow::Result<serde_json::Value> {
-    let url = format!("{}{}", base.trim_end_matches('/'), path_and_query);
-    let mut request = client.get(url);
-    if let Some(token) = token {
-        request = request.bearer_auth(token);
-    }
-    let response = request.send().context("服务未运行或无法连接")?;
-    let value = response
-        .json::<serde_json::Value>()
-        .context("响应不是合法 JSON")?;
-    unwrap_envelope(value)
-}
-
-/// TODO(Task 5): 并入 WebClient::call。
-fn http_delete(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    path_and_query: &str,
-    token: Option<&str>,
-) -> anyhow::Result<serde_json::Value> {
-    let url = format!("{}{}", base.trim_end_matches('/'), path_and_query);
-    let mut request = client.delete(url);
-    if let Some(token) = token {
-        request = request.bearer_auth(token);
-    }
-    let response = request.send().context("服务未运行或无法连接")?;
-    let value = response
-        .json::<serde_json::Value>()
-        .context("响应不是合法 JSON")?;
-    unwrap_envelope(value)
-}
-
-pub(crate) fn query_escape(value: &str) -> String {
-    value
-        .replace('%', "%25")
-        .replace('?', "%3F")
-        .replace('&', "%26")
-        .replace('=', "%3D")
-        .replace('#', "%23")
-}
-
-pub fn dispatch(cli: &Cli, base: &str, token: Option<&str>) -> anyhow::Result<()> {
+pub fn dispatch(cli: &Cli, client: &WebClient) -> anyhow::Result<()> {
     let crate::Command::Config { action } = &cli.command else {
         bail!("非 config 子命令")
     };
-    let client = reqwest::blocking::Client::new();
     match action {
         ConfigAction::Add {
             name,
             from_file,
             subscription,
-        } => add(
-            &client,
-            base,
-            token,
-            name,
-            from_file.as_deref(),
-            subscription.as_deref(),
-        ),
-        ConfigAction::List => list(&client, base, token),
-        ConfigAction::Show { name } => show(&client, base, token, name),
-        ConfigAction::Delete { name, yes } => delete(&client, base, token, name, *yes),
+        } => add(client, name, from_file.as_deref(), subscription.as_deref()),
+        ConfigAction::List => list(client),
+        ConfigAction::Show { name } => show(client, name),
+        ConfigAction::Delete { name, yes } => delete(client, name, *yes),
     }
 }
 
 fn add(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: Option<&str>,
+    client: &WebClient,
     name: &str,
     from_file: Option<&str>,
     subscription: Option<&str>,
@@ -165,12 +67,9 @@ fn add(
         }
         (None, Some(code)) => {
             // 预览只读远端、不落盘；失败则不保存（计划 §4 Task 2）
-            let preview = http_post(
-                client,
-                base,
+            let preview = client.post(
                 "/api/subscription/preview",
                 serde_json::json!({ "subscription": code }),
-                token,
             )?;
             print_preview(&preview);
             subscription_toml(name, code)
@@ -178,12 +77,9 @@ fn add(
         // clap 的 conflicts_with 已挡 (Some, Some)；两者皆缺无意义
         _ => bail!("须指定 --from-file <路径> 或 --subscription <码>"),
     };
-    http_post(
-        client,
-        base,
+    client.post(
         "/api/config",
         serde_json::json!({ "file_name": file_name, "config": config }),
-        token,
     )?;
     println!("已保存配置 {file_name}");
     Ok(())
@@ -219,8 +115,8 @@ fn print_preview(preview: &serde_json::Value) {
     );
 }
 
-fn list(client: &reqwest::blocking::Client, base: &str, token: Option<&str>) -> anyhow::Result<()> {
-    let data = http_get(client, base, "/api/config/list", token)?;
+fn list(client: &WebClient) -> anyhow::Result<()> {
+    let data = client.get("/api/config/list")?;
     let entries = data.as_array().context("配置列表响应不是数组")?;
     if entries.is_empty() {
         println!("（无已保存配置）");
@@ -250,19 +146,12 @@ fn list(client: &reqwest::blocking::Client, base: &str, token: Option<&str>) -> 
     Ok(())
 }
 
-fn show(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: Option<&str>,
-    name: &str,
-) -> anyhow::Result<()> {
+fn show(client: &WebClient, name: &str) -> anyhow::Result<()> {
     let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
-    let data = http_get(
-        client,
-        base,
-        &format!("/api/config?file_name={}", query_escape(&file_name)),
-        token,
-    )?;
+    let data = client.get(&format!(
+        "/api/config?file_name={}",
+        query_escape(&file_name)
+    ))?;
     let content = data.as_str().context("配置内容响应不是字符串")?;
     print!("{content}");
     if !content.ends_with('\n') {
@@ -271,24 +160,16 @@ fn show(
     Ok(())
 }
 
-fn delete(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: Option<&str>,
-    name: &str,
-    yes: bool,
-) -> anyhow::Result<()> {
+fn delete(client: &WebClient, name: &str, yes: bool) -> anyhow::Result<()> {
     // --yes 门禁在任何网络/校验之前（无 TTY 交互场景，计划 §5）
     if !yes {
         bail!("删除配置须显式确认，请加 --yes");
     }
     let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
-    http_delete(
-        client,
-        base,
-        &format!("/api/config?file_name={}", query_escape(&file_name)),
-        token,
-    )?;
+    client.delete(&format!(
+        "/api/config?file_name={}",
+        query_escape(&file_name)
+    ))?;
     println!("已删除配置 {file_name}");
     Ok(())
 }

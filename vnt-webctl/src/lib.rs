@@ -6,6 +6,7 @@
 use clap::{Parser, Subcommand};
 
 pub mod config;
+pub mod http;
 pub mod lifecycle;
 pub mod render;
 pub mod telemetry;
@@ -66,23 +67,42 @@ pub enum ConfigAction {
 }
 
 /// 解析参数并派发子命令；成功返回退出码 0。
-/// `base` 为服务地址（如 `http://127.0.0.1:19099`），`token` 为可选 Bearer 令牌
-/// （Task 6 由 main_web 接线传入）。
+/// `base` 为服务地址（接受裸端口/host:port/完整 URL，见
+/// [`http::WebClient::new`]），`token` 为可选 Bearer 令牌
+/// （优先序：本参数 > `VNT_WEB_TOKEN` env > 无，见 [`http::resolve_token`]；
+/// Task 6 由 main_web 把 --token flag 接线传入）。
+///
+/// WebError 三分类统一映射为退出码 1 并打印对应文案；
+/// Task 3/4 定义的幂等/信息性退出码 0 路径不受影响。
 pub fn run_cli(
     args: impl Iterator<Item = String>,
     base: &str,
-    token: Option<&str>,
+    cli_token: Option<&str>,
 ) -> anyhow::Result<i32> {
     let cli = Cli::try_parse_from(args)?;
-    match &cli.command {
-        Command::Config { .. } => config::dispatch(&cli, base, token)?,
+    let client =
+        http::WebClient::new(base, http::resolve_token(cli_token)).map_err(anyhow::Error::from)?;
+    let result = match &cli.command {
+        Command::Config { .. } => config::dispatch(&cli, &client),
         Command::Start { .. }
         | Command::Stop { .. }
         | Command::Restart { .. }
-        | Command::Status { .. } => lifecycle::dispatch(&cli, base, token)?,
+        | Command::Status { .. } => lifecycle::dispatch(&cli, &client),
         Command::Info { .. } | Command::Peers { .. } | Command::Routes { .. } => {
-            telemetry::dispatch(&cli, base, token)?
+            telemetry::dispatch(&cli, &client)
+        }
+    };
+    match result {
+        Ok(()) => Ok(0),
+        Err(error) => {
+            // WebError 三分类：文案各异、退出码统一 1（anyhow 已透传 Display）
+            match error.downcast::<http::WebError>() {
+                Ok(web_error) => {
+                    eprintln!("{web_error}");
+                    Ok(1)
+                }
+                Err(other) => Err(other),
+            }
         }
     }
-    Ok(0)
 }

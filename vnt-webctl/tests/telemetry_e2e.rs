@@ -155,15 +155,12 @@ fn routes_not_running_is_informational_success() {
     assert_eq!(code, 0);
 }
 
-/// 其它 code:-1（如配置不存在）仍为命令失败。
+/// 其它 code:-1（如配置不存在）映射为退出码 1（Task 5 错误映射）。
 #[test]
-fn peers_other_api_error_is_failure() {
+fn peers_other_api_error_exits_one() {
     let server = spawn_server(|_| err_envelope("Config file not found"));
-    let err = run_cli(&["peers", "foo"], &server.base).expect_err("其它 -1 须报错");
-    assert!(
-        err.to_string().contains("Config file not found"),
-        "错误应透出 API 文案: {err}"
-    );
+    let code = run_cli(&["peers", "foo"], &server.base).expect("其它 -1 映射为退出码 1");
+    assert_eq!(code, 1);
 }
 
 /// peers 正常数据：退出码 0。

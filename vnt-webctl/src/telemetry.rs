@@ -9,7 +9,8 @@
 use anyhow::{Context, bail};
 
 use crate::Cli;
-use crate::config::{http_get, normalize_config_name, query_escape};
+use crate::config::normalize_config_name;
+use crate::http::{WebClient, WebError, query_escape};
 use crate::render::{format_bytes, format_mode, opt, table};
 
 /// get_peers/get_routes 对未运行实例的错误文案
@@ -244,48 +245,27 @@ pub fn render_routes(name: &str, data: &serde_json::Value) -> String {
 }
 
 /// 拉取遥测端点；「VNT not running」映射为 None（信息性分支）。
-fn fetch(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: Option<&str>,
-    path: &str,
-) -> anyhow::Result<Option<serde_json::Value>> {
-    match http_get(client, base, path, token) {
+fn fetch(client: &WebClient, path: &str) -> anyhow::Result<Option<serde_json::Value>> {
+    match client.get(path) {
         Ok(data) => Ok(Some(data)),
-        Err(error) if error.to_string().contains(NOT_RUNNING_HINT) => Ok(None),
-        Err(error) => Err(error),
+        Err(WebError::Api(msg)) if msg.contains(NOT_RUNNING_HINT) => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
-pub fn info(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: Option<&str>,
-    name: &str,
-) -> anyhow::Result<()> {
+pub fn info(client: &WebClient, name: &str) -> anyhow::Result<()> {
     let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
-    let data = http_get(
-        client,
-        base,
-        &format!("/api/info?file_name={}", query_escape(&file_name)),
-        token,
-    )
-    .context("查询实例信息失败")?;
+    let data = client
+        .get(&format!("/api/info?file_name={}", query_escape(&file_name)))
+        .context("查询实例信息失败")?;
     print!("{}", render_info(name, &data));
     Ok(())
 }
 
-pub fn peers(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: Option<&str>,
-    name: &str,
-) -> anyhow::Result<()> {
+pub fn peers(client: &WebClient, name: &str) -> anyhow::Result<()> {
     let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
     let data = fetch(
         client,
-        base,
-        token,
         &format!("/api/peers?file_name={}", query_escape(&file_name)),
     )?;
     match data {
@@ -296,17 +276,10 @@ pub fn peers(
     Ok(())
 }
 
-pub fn routes(
-    client: &reqwest::blocking::Client,
-    base: &str,
-    token: Option<&str>,
-    name: &str,
-) -> anyhow::Result<()> {
+pub fn routes(client: &WebClient, name: &str) -> anyhow::Result<()> {
     let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
     let data = fetch(
         client,
-        base,
-        token,
         &format!("/api/routes?file_name={}", query_escape(&file_name)),
     )?;
     match data {
@@ -316,12 +289,11 @@ pub fn routes(
     Ok(())
 }
 
-pub fn dispatch(cli: &Cli, base: &str, token: Option<&str>) -> anyhow::Result<()> {
-    let client = reqwest::blocking::Client::new();
+pub fn dispatch(cli: &Cli, client: &WebClient) -> anyhow::Result<()> {
     match &cli.command {
-        crate::Command::Info { name } => info(&client, base, token, name),
-        crate::Command::Peers { name } => peers(&client, base, token, name),
-        crate::Command::Routes { name } => routes(&client, base, token, name),
+        crate::Command::Info { name } => info(client, name),
+        crate::Command::Peers { name } => peers(client, name),
+        crate::Command::Routes { name } => routes(client, name),
         _ => bail!("非遥测子命令"),
     }
 }

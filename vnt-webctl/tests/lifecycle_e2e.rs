@@ -9,6 +9,7 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 
+use vnt_webctl::http::WebClient;
 use vnt_webctl::lifecycle::{self, PollConfig};
 
 /// 生产轮询节奏由环境变量覆盖（测试注入快速值，避免每个经 run_cli 的
@@ -205,15 +206,9 @@ fn start_already_running_uses_default_poll_config() {
         err_envelope("配置 foo.toml 正在启动或已运行"),
         vec![ok_envelope(r#"{"status":"running"}"#)],
     );
-    let client = reqwest::blocking::Client::new();
-    lifecycle::start(
-        &client,
-        &server.base,
-        None,
-        "foo",
-        &lifecycle::PollConfig::default(),
-    )
-    .expect("直接成功路径不得被 30s 轮询阻塞");
+    let client = WebClient::new(&server.base, None).unwrap();
+    lifecycle::start(&client, "foo", &lifecycle::PollConfig::default())
+        .expect("直接成功路径不得被 30s 轮询阻塞");
 }
 
 #[test]
@@ -275,21 +270,18 @@ fn start_timeout_is_error() {
         ok_envelope("null"),
         vec![ok_envelope(r#"{"status":"starting"}"#)],
     );
-    let client = reqwest::blocking::Client::new();
-    let err = lifecycle::start(&client, &server.base, None, "foo", &FAST)
-        .expect_err("始终 Starting 须超时");
+    let client = WebClient::new(&server.base, None).unwrap();
+    let err = lifecycle::start(&client, "foo", &FAST).expect_err("始终 Starting 须超时");
     assert!(err.to_string().contains("超时"), "错误应提及超时: {err}");
 }
 
-/// 配置文件不存在：/api/start 的 code:-1 原样透出。
+/// 配置文件不存在：/api/start 的 code:-1 映射为退出码 1（msg 打到 stderr，
+/// Task 5 错误到退出码映射）。
 #[test]
-fn start_missing_config_surfaces_api_error() {
+fn start_missing_config_exits_one() {
     let server = spawn_sequence_server(err_envelope("Config file not found"), vec![]);
-    let err = run_cli(&["start", "foo"], &server.base).expect_err("缺配置须报错");
-    assert!(
-        err.to_string().contains("Config file not found"),
-        "错误应透出 API 文案: {err}"
-    );
+    let code = run_cli(&["start", "foo"], &server.base).expect("API 错误映射为退出码 1");
+    assert_eq!(code, 1);
 }
 
 // ---- stop ----
@@ -310,13 +302,10 @@ fn stop_already_stopped_is_idempotent_success() {
     assert_eq!(code, 0);
 }
 
-/// 其它 code:-1（如「停止网络实例超时」）仍为错误。
+/// 其它 code:-1（如「停止网络实例超时」）映射为退出码 1。
 #[test]
-fn stop_other_error_is_failure() {
+fn stop_other_error_exits_one() {
     let server = spawn_stop_server(err_envelope("停止网络实例超时"));
-    let err = run_cli(&["stop", "foo"], &server.base).expect_err("其它 -1 须报错");
-    assert!(
-        err.to_string().contains("停止网络实例超时"),
-        "错误应透出 API 文案: {err}"
-    );
+    let code = run_cli(&["stop", "foo"], &server.base).expect("其它 -1 映射为退出码 1");
+    assert_eq!(code, 1);
 }
