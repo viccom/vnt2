@@ -6,6 +6,7 @@
 use clap::{Parser, Subcommand};
 
 pub mod config;
+pub mod lifecycle;
 
 #[derive(Parser, Debug)]
 #[command(name = "vnt2_web", about = "vnt2_web 管理子命令", version)]
@@ -71,6 +72,15 @@ pub fn run_cli(
     token: Option<&str>,
 ) -> anyhow::Result<i32> {
     let cli = Cli::try_parse_from(args)?;
-    config::dispatch(&cli, base, token)?;
+    match &cli.command {
+        Command::Config { .. } => config::dispatch(&cli, base, token)?,
+        Command::Start { .. }
+        | Command::Stop { .. }
+        | Command::Restart { .. }
+        | Command::Status { .. } => lifecycle::dispatch(&cli, base, token)?,
+        Command::Info { .. } | Command::Peers { .. } | Command::Routes { .. } => {
+            anyhow::bail!("子命令尚未实现")
+        }
+    }
     Ok(0)
 }

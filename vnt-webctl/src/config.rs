@@ -60,7 +60,7 @@ fn unwrap_envelope(value: serde_json::Value) -> anyhow::Result<serde_json::Value
 }
 
 /// TODO(Task 5): 并入 WebClient::call。
-fn http_post(
+pub(crate) fn http_post(
     client: &reqwest::blocking::Client,
     base: &str,
     path: &str,
@@ -80,7 +80,7 @@ fn http_post(
 }
 
 /// TODO(Task 5): 并入 WebClient::call。
-fn http_get(
+pub(crate) fn http_get(
     client: &reqwest::blocking::Client,
     base: &str,
     path_and_query: &str,
@@ -117,7 +117,7 @@ fn http_delete(
     unwrap_envelope(value)
 }
 
-fn query_escape(value: &str) -> String {
+pub(crate) fn query_escape(value: &str) -> String {
     value
         .replace('%', "%25")
         .replace('?', "%3F")
@@ -128,7 +128,7 @@ fn query_escape(value: &str) -> String {
 
 pub fn dispatch(cli: &Cli, base: &str, token: Option<&str>) -> anyhow::Result<()> {
     let crate::Command::Config { action } = &cli.command else {
-        bail!("子命令尚未实现")
+        bail!("非 config 子命令")
     };
     let client = reqwest::blocking::Client::new();
     match action {
