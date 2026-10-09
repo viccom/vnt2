@@ -29,6 +29,7 @@
 | GET | `/api/start/status` | query `file_name` | 启动状态轮询：`{status}`。实例不存在时返回 `Stopped`（前端据此自然终止轮询） |
 | GET | `/api/instance/logs` | query `file_name` | 最近 50 条日志 `[{level, message, time}]`，`time` 格式 `HH:MM:SS`，停止后仍可查 |
 | GET | `/api/instance/config` | query `file_name` | 运行中实例的**生效配置** TOML 文本（本地配置与服务端下发合并后的只读快照；读快照而非实时锁，避免阻塞监测循环） |
+| GET | `/api/notifications` | 无 | 平台通知聚合（跨实例，无 `file_name`）：`[{file_name, level, title, body, received_at}]`，按 `received_at` 倒序、并列按实例名稳定排序。来源 GenericCtrl notify 环形缓冲（每实例最近 50 条，**会话级：实例停止即丢失**）；前端角标轮询（15s）展示 |
 
 `status` 取值（`VntStatus`）：`Stopped` / `Starting` / `Running`。
 

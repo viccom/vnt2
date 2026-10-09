@@ -116,3 +116,6 @@ export const clearSubscriptionOverrides = (fileName, fields = null) =>
   });
 
 export const detachSubscription = (fileName) => postAction("/api/subscription/detach", fileName);
+
+// GET /api/notifications 平台通知(GenericCtrl notify,每实例保留最近 50 条,会话级)
+export const getNotifications = () => request("/api/notifications");

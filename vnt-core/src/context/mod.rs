@@ -340,8 +340,7 @@ impl AppState {
         }
     }
 
-    /// web 展示面后补（service_http.rs 冻结期间）；缓冲写入已就位
-    #[allow(dead_code)]
+    /// 展示面经 VntApi::platform_notifications 消费
     pub(crate) fn platform_notifications_snapshot(&self) -> Vec<PlatformNotification> {
         self.platform_notifications.lock().iter().cloned().collect()
     }
@@ -1402,5 +1401,32 @@ impl AppState {
         }
         info.local_ipv4s.retain(|ip| !self.network_contains(ip));
         info
+    }
+}
+
+#[cfg(test)]
+mod platform_notification_tests {
+    use super::{AppState, PLATFORM_NOTIFICATION_CAPACITY, PlatformNotification};
+
+    fn notify(title: &str, received_at: i64) -> PlatformNotification {
+        PlatformNotification {
+            level: "info".to_string(),
+            title: title.to_string(),
+            body: String::new(),
+            received_at,
+        }
+    }
+
+    // 回归护栏：环形缓冲保序、超容量丢最旧（展示面按此语义显示"最近 50 条"）
+    #[test]
+    fn platform_notification_ring_keeps_recent_in_order() {
+        let state = AppState::default();
+        for i in 0..(PLATFORM_NOTIFICATION_CAPACITY as i64 + 10) {
+            state.push_platform_notification(notify(&format!("n{i}"), i));
+        }
+        let snap = state.platform_notifications_snapshot();
+        assert_eq!(snap.len(), PLATFORM_NOTIFICATION_CAPACITY);
+        assert_eq!(snap.first().unwrap().title, "n10", "最旧的 10 条应被淘汰");
+        assert_eq!(snap.last().unwrap().title, "n59", "最新条目保持在队尾");
     }
 }

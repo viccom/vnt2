@@ -996,6 +996,59 @@ async fn get_instance_config(
     }
 }
 
+#[derive(Serialize, Clone)]
+struct NotificationItem {
+    /// 通知所属实例（平台通知按实例会话缓冲）
+    file_name: String,
+    /// info | warning | important
+    level: String,
+    title: String,
+    body: String,
+    /// 接收时间（毫秒时间戳）
+    received_at: i64,
+}
+
+/// 多实例通知聚合：打上所属实例标识，时间倒序；时间并列按实例名稳定排序
+fn merge_notifications(
+    per_instance: Vec<(String, Vec<vnt_core::api::PlatformNotificationInfo>)>,
+) -> Vec<NotificationItem> {
+    let mut merged: Vec<NotificationItem> = per_instance
+        .into_iter()
+        .flat_map(|(file_name, list)| {
+            list.into_iter().map(move |n| NotificationItem {
+                file_name: file_name.clone(),
+                level: n.level,
+                title: n.title,
+                body: n.body,
+                received_at: n.received_at,
+            })
+        })
+        .collect();
+    merged.sort_by(|a, b| {
+        b.received_at
+            .cmp(&a.received_at)
+            .then_with(|| a.file_name.cmp(&b.file_name))
+    });
+    merged
+}
+
+/// 平台通知（GenericCtrl notify 环形缓冲，每实例保留最近 50 条；实例停止即丢失）
+async fn get_notifications(
+    State(state): State<HttpAppState>,
+) -> Json<ApiResponse<Vec<NotificationItem>>> {
+    let lock = state.inner.lock();
+    let per_instance = lock
+        .instances
+        .iter()
+        .filter_map(|(file_name, inst)| {
+            inst.vnt
+                .as_ref()
+                .map(|v| (file_name.clone(), v.api.platform_notifications()))
+        })
+        .collect();
+    Json(ApiResponse::success(merge_notifications(per_instance)))
+}
+
 async fn get_instances(
     State(state): State<HttpAppState>,
 ) -> Json<ApiResponse<Vec<InstanceSummary>>> {
@@ -1162,6 +1215,7 @@ fn api_router(state: HttpAppState, runtime: ServiceRuntime) -> Router {
         .route("/api/routes", get(get_routes))
         .route("/api/start/status", get(get_start_status))
         .route("/api/instance/logs", get(get_instance_logs))
+        .route("/api/notifications", get(get_notifications))
         .route("/api/instance/config", get(get_instance_config))
         .route("/api/instances", get(get_instances))
         .route("/api/instance", delete(dismiss_instance_handler))
@@ -3751,5 +3805,32 @@ subscription = "vnt2://join/2/eyJ2IjoyfQ"
         let json = serde_json::to_string(&state).unwrap();
         assert!(!json.contains("credential"));
         assert!(!json.contains("subscription"));
+    }
+
+    // T: 多实例通知聚合——file_name 打标、按时间倒序、时间相同按实例名稳定排序
+    #[test]
+    fn merge_notifications_tags_and_sorts_newest_first() {
+        use vnt_core::api::PlatformNotificationInfo;
+        let mk = |title: &str, received_at: i64| PlatformNotificationInfo {
+            level: "info".to_string(),
+            title: title.to_string(),
+            body: String::new(),
+            received_at,
+        };
+        let per_instance = vec![
+            (
+                "b.toml".to_string(),
+                vec![mk("b-old", 100), mk("b-new", 300)],
+            ),
+            (
+                "a.toml".to_string(),
+                vec![mk("a-mid", 200), mk("a-tie", 100)],
+            ),
+        ];
+        let merged = merge_notifications(per_instance);
+        let titles: Vec<&str> = merged.iter().map(|n| n.title.as_str()).collect();
+        // 时间倒序；并列 100 时按实例名稳定排序（a.toml 先于 b.toml）
+        assert_eq!(titles, vec!["b-new", "a-mid", "a-tie", "b-old"]);
+        assert_eq!(merged[3].file_name, "b.toml", "条目须携带所属实例标识");
     }
 }

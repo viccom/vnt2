@@ -11,6 +11,7 @@ use crate::tunnel_core::server::rpc::ServerRPC;
 use anyhow::Context;
 use ipnet::Ipv4Net;
 use rustp2p_core::nat::NatInfo;
+use serde::Serialize;
 use std::net::Ipv4Addr;
 
 #[derive(Clone, Debug)]
@@ -19,6 +20,17 @@ pub struct ApiNodeInfo {
     pub name: String,
     pub version: String,
     pub advertised_subnets: Vec<Ipv4Net>,
+}
+
+/// 平台通知展示态（GenericCtrl::Notify 经 Api 暴露给宿主）
+#[derive(Clone, Debug, Serialize)]
+pub struct PlatformNotificationInfo {
+    /// info | warning | important（未知值已在入口归一为 info）
+    pub level: String,
+    pub title: String,
+    pub body: String,
+    /// 接收时间（毫秒时间戳）
+    pub received_at: i64,
 }
 
 #[derive(Clone)]
@@ -64,6 +76,19 @@ impl VntApi {
     /// 获取所有路由
     pub fn route_table(&self) -> Vec<(Ipv4Addr, Vec<Route>)> {
         self.app_state.route_table.route_table()
+    }
+    /// 平台通知快照（GenericCtrl notify 环形缓冲，会话级：实例停止即丢失）
+    pub fn platform_notifications(&self) -> Vec<PlatformNotificationInfo> {
+        self.app_state
+            .platform_notifications_snapshot()
+            .into_iter()
+            .map(|n| PlatformNotificationInfo {
+                level: n.level,
+                title: n.title,
+                body: n.body,
+                received_at: n.received_at,
+            })
+            .collect()
     }
     /// Returns identities learned from direct handshakes and Gossip
     /// announcements. Entries disappear with their last route.

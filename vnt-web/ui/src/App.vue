@@ -10,6 +10,7 @@ import AppTooltip from "./components/AppTooltip.vue";
 import ConfirmHost from "./components/ConfirmHost.vue";
 import ToastHost from "./components/ToastHost.vue";
 import AccessGate from "./components/AccessGate.vue";
+import NotificationBell from "./components/NotificationBell.vue";
 import { authorized, isDesktop } from "./auth";
 
 const app = useAppStore();
@@ -84,6 +85,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
 
         <div class="ml-auto flex items-center gap-2">
           <div id="page-actions" class="flex items-center gap-2"></div>
+          <NotificationBell />
           <div class="flex h-8 items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-500 sm:px-3 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
             <span
               class="h-1.5 w-1.5 rounded-full"
