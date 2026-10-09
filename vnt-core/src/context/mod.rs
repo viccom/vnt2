@@ -1194,6 +1194,9 @@ impl AppState {
         self.punch_backoff.clear();
         self.packet_loss_stats.clear();
         self.traffic_stats.clear();
+        // 通知为会话级运行态，与 traffic_stats 同语义：停止即清空，
+        // 残留的 VntApi 句柄（重建失败路径会缓存）不得再读到旧会话通知
+        self.platform_notifications.lock().clear();
         self.p2p_listen_addrs.lock().clear();
     }
 
@@ -1428,5 +1431,19 @@ mod platform_notification_tests {
         assert_eq!(snap.len(), PLATFORM_NOTIFICATION_CAPACITY);
         assert_eq!(snap.first().unwrap().title, "n10", "最旧的 10 条应被淘汰");
         assert_eq!(snap.last().unwrap().title, "n59", "最新条目保持在队尾");
+    }
+
+    // 通知为会话级运行态：停止组网必须清空（对齐 traffic_stats 等既有清空项，
+    // 防已停实例残留句柄——如重建失败路径缓存的 VntApi——继续透出旧会话通知）
+    #[test]
+    fn platform_notifications_cleared_on_stop_network() {
+        let state = AppState::default();
+        state.push_platform_notification(notify("stale", 1));
+        assert_eq!(state.platform_notifications_snapshot().len(), 1);
+        state.stop_network();
+        assert!(
+            state.platform_notifications_snapshot().is_empty(),
+            "stop_network 后残留句柄不得再读到旧会话通知"
+        );
     }
 }

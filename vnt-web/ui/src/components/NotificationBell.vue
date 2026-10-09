@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from "vue";
+import { ref, watch, onMounted, onBeforeUnmount } from "vue";
 import { useNotificationStore } from "../stores/notifications";
 
 const store = useNotificationStore();
@@ -11,6 +11,15 @@ const toggle = () => {
   // 展开即已读：角标清零，条目仍在面板内保留展示
   if (open.value) store.markSeen();
 };
+
+// 面板保持打开时，轮询新到的条目已展示在用户眼前，同步标已读
+watch(
+  () => store.list,
+  () => {
+    if (open.value) store.markSeen();
+  },
+  { deep: true },
+);
 
 const onDocClick = (event) => {
   if (open.value && rootRef.value && !rootRef.value.contains(event.target)) {
@@ -81,19 +90,19 @@ const formatTime = (ms) => {
         </p>
         <ul v-else class="divide-y divide-slate-100 dark:divide-slate-800">
           <li v-for="(n, i) in store.list" :key="`${n.file_name}-${n.received_at}-${i}`" class="px-4 py-3">
-            <div class="flex items-center gap-2">
-              <span class="rounded px-1.5 py-0.5 text-[10px] font-semibold" :class="levelClass(n.level)">
+            <div class="flex items-start gap-2">
+              <span class="mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold" :class="levelClass(n.level)">
                 {{ levelLabel(n.level) }}
               </span>
-              <span class="min-w-0 flex-1 truncate text-sm font-medium text-slate-900 dark:text-white">
+              <span class="min-w-0 flex-1 self-center break-words text-sm font-medium text-slate-900 dark:text-white">
                 {{ n.title }}
               </span>
-              <span class="shrink-0 font-mono text-[10px] text-slate-400">{{ formatTime(n.received_at) }}</span>
+              <span class="shrink-0 self-start font-mono text-[10px] text-slate-400">{{ formatTime(n.received_at) }}</span>
             </div>
             <p v-if="n.body" class="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-slate-500 dark:text-slate-400">
               {{ n.body }}
             </p>
-            <p class="mt-1 text-[10px] text-slate-400">实例：{{ n.file_name }}</p>
+            <p class="mt-1 text-[10px] text-slate-400">类型：平台通知 · 实例：{{ n.file_name }}</p>
           </li>
         </ul>
       </div>
