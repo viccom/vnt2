@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail};
 
 use crate::Cli;
-use crate::config::normalize_config_name;
 use crate::http::{WebClient, query_escape};
 
 /// 连续非终态 code:-1 的容忍上限（Starting 竞态窗口）。
@@ -222,7 +221,7 @@ fn poll_until_terminal(
 ///
 /// 已在运行/正在启动（begin_vnt_start 幂等分支）视为成功，打印当前状态。
 pub fn start(client: &WebClient, name: &str, config: &PollConfig) -> anyhow::Result<()> {
-    let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
+    let file_name = crate::config::resolve_instance_name(client, name)?;
     let body = serde_json::json!({ "file_name": file_name });
     match client.post("/api/start", body.clone()) {
         Ok(_) => {
@@ -243,7 +242,7 @@ pub fn start(client: &WebClient, name: &str, config: &PollConfig) -> anyhow::Res
 /// `stop <名>`：POST /api/stop。已停止实例的 code:-1 "Vnt stopped"
 /// 视为幂等成功；其它 code:-1 原样报错。
 pub fn stop(client: &WebClient, name: &str) -> anyhow::Result<()> {
-    let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
+    let file_name = crate::config::resolve_instance_name(client, name)?;
     let body = serde_json::json!({ "file_name": file_name });
     match client.post("/api/stop", body) {
         Ok(_) => println!("已停止实例 {name}"),
@@ -258,7 +257,7 @@ pub fn stop(client: &WebClient, name: &str) -> anyhow::Result<()> {
 /// `restart <名>`：POST /api/restart（服务端异步启动，不回传终态，
 /// 与 web 界面行为一致；观察启动结果用 `status`）。
 pub fn restart(client: &WebClient, name: &str) -> anyhow::Result<()> {
-    let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
+    let file_name = crate::config::resolve_instance_name(client, name)?;
     let body = serde_json::json!({ "file_name": file_name });
     client.post("/api/restart", body)?;
     println!("已重启实例 {name}");
@@ -267,7 +266,7 @@ pub fn restart(client: &WebClient, name: &str) -> anyhow::Result<()> {
 
 /// `status <名>`：打印状态；Running 时附加 /api/info 关键摘要。
 pub fn status(client: &WebClient, name: &str) -> anyhow::Result<()> {
-    let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
+    let file_name = crate::config::resolve_instance_name(client, name)?;
     let current = fetch_status(client, &file_name)?;
     println!("实例 {name} 状态: {}", status_label(current));
     if current != PollStatus::Running {

@@ -38,6 +38,50 @@ pub fn subscription_toml(config_name: &str, code: &str) -> String {
     )
 }
 
+fn fetch_config_list(client: &WebClient) -> anyhow::Result<Vec<(String, String)>> {
+    let data = client.get("/api/config/list")?;
+    let entries = data.as_array().context("配置列表响应不是数组")?;
+    Ok(entries
+        .iter()
+        .map(|entry| {
+            (
+                entry
+                    .get("file_name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                entry
+                    .get("config_name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        })
+        .collect())
+}
+
+/// 实例名解析：API 实例查找主键是 file_name（网页保存的可能是无语义时间戳
+/// 名），用户心智模型是 config_name——先按规范化 file_name 精确匹配，再按
+/// config_name 别名匹配；无匹配透传规范化名（让服务端报它的原错误，维持
+/// 既有语义）；config_name 重名歧义则报错列出候选。
+pub fn resolve_instance_name(client: &WebClient, raw: &str) -> anyhow::Result<String> {
+    let normalized = normalize_config_name(raw).map_err(anyhow::Error::msg)?;
+    let entries = fetch_config_list(client)?;
+    let hits: Vec<&str> = entries
+        .iter()
+        .filter(|(file_name, config_name)| file_name == &normalized || config_name == raw)
+        .map(|(file_name, _)| file_name.as_str())
+        .collect();
+    match hits.len() {
+        0 => Ok(normalized),
+        1 => Ok(hits[0].to_string()),
+        _ => bail!(
+            "名称 \"{raw}\" 匹配到多个配置（config_name 重复），请使用完整 file_name：{}",
+            hits.join(", ")
+        ),
+    }
+}
+
 pub fn dispatch(cli: &Cli, client: &WebClient) -> anyhow::Result<()> {
     let crate::Command::Config { action } = &cli.command else {
         bail!("非 config 子命令")
@@ -116,29 +160,11 @@ fn print_preview(preview: &serde_json::Value) {
 }
 
 fn list(client: &WebClient) -> anyhow::Result<()> {
-    let data = client.get("/api/config/list")?;
-    let entries = data.as_array().context("配置列表响应不是数组")?;
-    if entries.is_empty() {
+    let rows = fetch_config_list(client)?;
+    if rows.is_empty() {
         println!("（无已保存配置）");
         return Ok(());
     }
-    let rows: Vec<(String, String)> = entries
-        .iter()
-        .map(|entry| {
-            (
-                entry
-                    .get("file_name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                entry
-                    .get("config_name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-            )
-        })
-        .collect();
     let name_width = rows.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
     for (file_name, config_name) in &rows {
         println!("{file_name:<name_width$}  {config_name}");
@@ -147,7 +173,7 @@ fn list(client: &WebClient) -> anyhow::Result<()> {
 }
 
 fn show(client: &WebClient, name: &str) -> anyhow::Result<()> {
-    let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
+    let file_name = resolve_instance_name(client, name)?;
     let data = client.get(&format!(
         "/api/config?file_name={}",
         query_escape(&file_name)
@@ -165,7 +191,7 @@ fn delete(client: &WebClient, name: &str, yes: bool) -> anyhow::Result<()> {
     if !yes {
         bail!("删除配置须显式确认，请加 --yes");
     }
-    let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
+    let file_name = resolve_instance_name(client, name)?;
     client.delete(&format!(
         "/api/config?file_name={}",
         query_escape(&file_name)

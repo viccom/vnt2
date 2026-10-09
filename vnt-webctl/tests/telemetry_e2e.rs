@@ -89,6 +89,15 @@ fn spawn_server(route: impl Fn(&str) -> String + Send + 'static) -> FakeServer {
             let Some(request_line) = read_request(&stream) else {
                 continue;
             };
+            // resolve_instance_name 会先查 /api/config/list：统一回空列表，
+            // 既有用例以真实 file_name 直连（透传路径）；别名映射由 config_resolve.rs 锁定
+            if request_line.starts_with("GET /api/config/list ") {
+                let body = r#"{"code":0,"msg":"","data":[]}"#;
+                if stream.write_all(&http_response(body)).is_err() {
+                    break;
+                }
+                continue;
+            }
             let body = route(&request_line);
             if stream.write_all(&http_response(&body)).is_err() {
                 break;

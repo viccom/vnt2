@@ -9,7 +9,6 @@
 use anyhow::{Context, bail};
 
 use crate::Cli;
-use crate::config::normalize_config_name;
 use crate::http::{WebClient, WebError, query_escape};
 use crate::render::{format_bytes, format_mode, opt, table};
 
@@ -254,7 +253,7 @@ fn fetch(client: &WebClient, path: &str) -> anyhow::Result<Option<serde_json::Va
 }
 
 pub fn info(client: &WebClient, name: &str) -> anyhow::Result<()> {
-    let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
+    let file_name = crate::config::resolve_instance_name(client, name)?;
     let data = client
         .get(&format!("/api/info?file_name={}", query_escape(&file_name)))
         .context("查询实例信息失败")?;
@@ -263,7 +262,7 @@ pub fn info(client: &WebClient, name: &str) -> anyhow::Result<()> {
 }
 
 pub fn peers(client: &WebClient, name: &str) -> anyhow::Result<()> {
-    let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
+    let file_name = crate::config::resolve_instance_name(client, name)?;
     let data = fetch(
         client,
         &format!("/api/peers?file_name={}", query_escape(&file_name)),
@@ -277,7 +276,7 @@ pub fn peers(client: &WebClient, name: &str) -> anyhow::Result<()> {
 }
 
 pub fn routes(client: &WebClient, name: &str) -> anyhow::Result<()> {
-    let file_name = normalize_config_name(name).map_err(anyhow::Error::msg)?;
+    let file_name = crate::config::resolve_instance_name(client, name)?;
     let data = fetch(
         client,
         &format!("/api/routes?file_name={}", query_escape(&file_name)),
