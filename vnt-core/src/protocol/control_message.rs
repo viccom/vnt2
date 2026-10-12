@@ -756,6 +756,9 @@ pub struct ClientSimpleInfo {
     pub ip: Ipv4Addr,
     pub online: bool,
     pub client_type: ClientType,
+    /// 来自联邦对端服务器（跨服务端单播可达），非本服务器直连成员。
+    /// 只用于单播择路与打洞候选，不计入广播覆盖。
+    pub federated: bool,
 }
 impl ClientSimpleInfo {
     pub fn from(msg: proto::ClientSimpleInfo) -> anyhow::Result<Self> {
@@ -763,6 +766,7 @@ impl ClientSimpleInfo {
             ip: msg.ip.into(),
             online: msg.online,
             client_type: msg.client_type(),
+            federated: msg.federated,
         })
     }
     pub fn to(self) -> proto::ClientSimpleInfo {
@@ -770,6 +774,7 @@ impl ClientSimpleInfo {
             ip: self.ip.into(),
             online: self.online,
             client_type: self.client_type as i32,
+            federated: self.federated,
         }
     }
 }
@@ -978,11 +983,13 @@ mod tests {
                     ip: Ipv4Addr::new(10, 26, 0, 8).into(),
                     online: true,
                     client_type: proto::ClientType::Ikev2 as i32,
+                    federated: false,
                 },
                 proto::ClientSimpleInfo {
                     ip: Ipv4Addr::new(10, 26, 0, 9).into(),
                     online: true,
                     client_type: proto::ClientType::Wireguard as i32,
+                    federated: false,
                 },
             ],
             is_all: true,

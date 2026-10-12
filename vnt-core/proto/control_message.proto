@@ -249,6 +249,10 @@ message ClientSimpleInfo{
   fixed32 ip = 1;
   bool online = 2;
   ClientType client_type = 3;
+  // 该条目来自联邦对端服务器（跨服务端单播可达），不是本服务器的直连成员。
+  // 客户端只把它用于单播择路与 P2P 打洞候选，不得计入广播覆盖
+  // （服务端不转发跨服务端广播）。
+  bool federated = 4;
 }
 
 message ClientSimpleInfoList{

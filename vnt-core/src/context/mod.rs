@@ -505,7 +505,9 @@ impl ServerInfoCollection {
                     (
                         v.client_map
                             .iter()
-                            .filter(|(_, v)| v.online && v.client_type == ClientType::Vnt)
+                            .filter(|(_, v)| {
+                                v.online && v.client_type == ClientType::Vnt && !v.federated
+                            })
                             .map(|(k, _)| *k)
                             .collect(),
                         v.rtt.unwrap_or(500),
@@ -570,6 +572,8 @@ impl ServerInfoCollection {
                 if !client.online {
                     return None;
                 }
+                // federated 条目仅表示"经该服务器跨服务端单播可达"，
+                // 与本地直连成员一样参与择路（服务器负责向对端转发）
 
                 let rtt = server.rtt.unwrap_or(u32::MAX);
 
@@ -1002,6 +1006,7 @@ mod client_status_tests {
                     ip: peer,
                     online,
                     client_type: ClientType::Vnt,
+                    federated: false,
                 }],
                 is_all: true,
                 time: 0,
@@ -1074,6 +1079,7 @@ mod client_status_tests {
                         ip,
                         online: true,
                         client_type,
+                        federated: false,
                     }],
                     is_all: true,
                     time: 0,
@@ -1086,6 +1092,64 @@ mod client_status_tests {
         assert_eq!(servers.client_type(&wireguard), Some(ClientType::Wireguard));
         assert!(!servers.client_online_ips().contains(&ikev2));
         assert!(!servers.client_online_ips().contains(&wireguard));
+    }
+
+    /// 联邦（跨服务端）VNT 条目：必须参与单播择路，但不得计入广播覆盖——
+    /// 服务端不转发跨服务端广播，若计入会让客户端把广播"投递成功"误判为
+    /// 已覆盖远端设备（静默漏投）。
+    #[test]
+    fn federated_entries_route_unicast_but_not_broadcast() {
+        let servers = ServerInfoCollection::default();
+        servers.update_server(vec![(0, ProtocolAddress::default())]);
+        let self_ip = Ipv4Addr::new(10, 26, 0, 1);
+        let local = Ipv4Addr::new(10, 26, 0, 5);
+        let federated = Ipv4Addr::new(10, 26, 0, 6);
+        servers.set_server_connected(0, true);
+        servers.update_client_simple_list(
+            0,
+            self_ip,
+            ClientSimpleInfoList {
+                data_version: 1,
+                list: vec![
+                    ClientSimpleInfo {
+                        ip: local,
+                        online: true,
+                        client_type: ClientType::Vnt,
+                        federated: false,
+                    },
+                    ClientSimpleInfo {
+                        ip: federated,
+                        online: true,
+                        client_type: ClientType::Vnt,
+                        federated: true,
+                    },
+                ],
+                is_all: true,
+                time: 0,
+            },
+            0,
+        );
+
+        // 单播：两者都可经该服务器投递
+        assert_eq!(
+            servers.find_ip_to_server(&[0], &local),
+            Some(0),
+            "本地成员可单播"
+        );
+        assert_eq!(
+            servers.find_ip_to_server(&[0], &federated),
+            Some(0),
+            "联邦成员必须可单播（否则跨服务器报 no route）"
+        );
+
+        // 广播：只覆盖本地成员
+        let coverage = servers.server_client_ip_map();
+        let (covered, _) = coverage.get(&0).expect("server 0 有覆盖");
+        assert!(covered.contains(&local), "本地成员计入广播覆盖");
+        assert!(
+            !covered.contains(&federated),
+            "联邦成员不得计入广播覆盖（服务端不转发跨服务端广播）"
+        );
     }
 
     #[test]
@@ -1135,6 +1199,7 @@ mod client_status_tests {
                     ip: peer,
                     client_type: ClientType::Vnt,
                     online: true,
+                    federated: false,
                 }],
                 is_all: true,
                 time: 0,
@@ -1150,6 +1215,7 @@ mod client_status_tests {
                     ip: peer,
                     client_type: ClientType::Wireguard,
                     online: true,
+                    federated: false,
                 }],
                 is_all: true,
                 time: 0,
