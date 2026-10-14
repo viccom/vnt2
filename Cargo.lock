@@ -6391,6 +6391,7 @@ dependencies = [
  "futures",
  "getifaddrs",
  "hex",
+ "http",
  "ipnet",
  "libc",
  "log",

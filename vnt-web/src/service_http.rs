@@ -2822,6 +2822,11 @@ fn convert_config(cfg: StartConfig) -> anyhow::Result<CoreConfig> {
         tunnel_addr: cfg.tunnel_addr,
         tunnel_port: cfg.tunnel_port,
         event_script: cfg.event_script,
+        // web UI 本期不透出 wss path/header 配置（StartConfig 无对应字段，
+        // 前端表单未加）；需要穿越 cookie 寻址反代时请用 CLI --wss-path/
+        // --wss-header 或配置文件的 wss_path/wss_headers 键
+        wss_path: String::new(),
+        wss_headers: Vec::new(),
         managed: None,
     })
 }

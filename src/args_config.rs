@@ -51,6 +51,11 @@ pub struct FileConfig {
     pub tunnel_addr: Option<Vec<SocketAddr>>,
     pub tunnel_port: Option<u16>,
     pub event_script: Option<String>,
+    /// wss 握手路径（空串或缺省归一为 "/"），仅 wss 协议生效
+    pub wss_path: Option<String>,
+    /// wss 握手附加 header，每项格式为 "Name: Value"，
+    /// 用于穿越要求 cookie 寻址的 HTTP 反代（如沙盒 webview 网关）
+    pub wss_headers: Option<Vec<String>>,
 }
 
 impl FileConfig {
@@ -111,7 +116,9 @@ impl FileConfig {
             tcp_stun,
             tunnel_addr,
             tunnel_port,
-            event_script
+            event_script,
+            wss_path,
+            wss_headers
         );
         self
     }
@@ -180,6 +187,33 @@ impl FileConfig {
             Ok(Vec::new())
         }
     }
+    /// 解析 "Name: Value" 形式的 wss 附加 header；缺冒号或名称为空即报错，
+    /// 具体 header 名/值合法性由 wss 握手构建时二次校验
+    pub fn to_wss_headers(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let Some(headers_raw) = &self.wss_headers else {
+            return Ok(Vec::new());
+        };
+        parse_wss_header_args(headers_raw)
+    }
+}
+
+/// 解析 CLI/文件中的 "Name: Value" 形式的 wss 附加 header 列表。
+/// 这里只校验分隔符与名称非空；header 名/值的 HTTP 合法性
+/// （令牌字符、无控制字符）在 wss 握手构建时统一校验。
+fn parse_wss_header_args(headers_raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    headers_raw
+        .iter()
+        .map(|value| {
+            let (name, header_value) = value
+                .split_once(':')
+                .ok_or_else(|| anyhow!("invalid wss header '{}': expected 'Name: Value'", value))?;
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(anyhow!("invalid wss header '{}': empty header name", value));
+            }
+            Ok((name.to_string(), header_value.trim().to_string()))
+        })
+        .collect()
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -283,6 +317,13 @@ pub struct Args {
     /// 事件脚本路径/命令；网卡创建成功、掉线、重连成功、IP 变化时以参数方式调用
     #[clap(long)]
     pub event_script: Option<String>,
+    /// wss 握手路径（缺省 "/"），用于挂在要求路径前缀的 HTTP 反代后面
+    #[clap(long)]
+    pub wss_path: Option<String>,
+    /// wss 握手附加 header，格式为 "Name: Value"，可重复指定；
+    /// 用于穿越要求 cookie 寻址的 HTTP 反代（如沙盒 webview 网关）
+    #[clap(long = "wss-header", value_name = "NAME: VALUE")]
+    pub wss_header: Vec<String>,
     /// 读取配置文件
     #[arg(long)]
     pub conf: Option<PathBuf>,
@@ -359,6 +400,18 @@ fn build_from_args_and_file(args: Args, file: FileConfig) -> anyhow::Result<(Con
         file.tunnel_addr.clone(),
         file.tunnel_port,
     )?;
+
+    // wss 附加 header：CLI 优先，否则解析文件配置；path 同理（空串视为未配置）
+    let wss_headers = if !args.wss_header.is_empty() {
+        parse_wss_header_args(&args.wss_header)?
+    } else {
+        file.to_wss_headers()?
+    };
+    let wss_path = args
+        .wss_path
+        .clone()
+        .or_else(|| file.wss_path.clone())
+        .unwrap_or_default();
 
     let network_code = args
         .network_code
@@ -443,6 +496,8 @@ fn build_from_args_and_file(args: Args, file: FileConfig) -> anyhow::Result<(Con
         tunnel_addr,
         tunnel_port,
         event_script: args.event_script.or_else(|| file.event_script.clone()),
+        wss_path,
+        wss_headers,
         managed: None,
     };
 
@@ -495,6 +550,8 @@ fn build_from_args_only(args: Args) -> anyhow::Result<(Config, CtrlConfig)> {
         tunnel_addr,
         tunnel_port,
         event_script: args.event_script,
+        wss_path: args.wss_path.unwrap_or_default(),
+        wss_headers: parse_wss_header_args(&args.wss_header)?,
         ..Default::default()
     };
     let ctrl_config = CtrlConfig {
@@ -509,6 +566,9 @@ fn build_from_file_only(file: FileConfig) -> anyhow::Result<(Config, CtrlConfig)
             "configuration key 'no_tun' was removed; use device_mode = \"no|tun|tap\""
         ));
     }
+    // wss 配置先借整份 file 算出，避免后续字段逐一移动后无法整体借用
+    let wss_path = file.wss_path.clone().unwrap_or_default();
+    let wss_headers = file.to_wss_headers()?;
     let server_addr = file.to_server_addr()?;
     let peer_address = file.to_peer_address()?;
     let turn = file.to_turn()?;
@@ -576,6 +636,8 @@ fn build_from_file_only(file: FileConfig) -> anyhow::Result<(Config, CtrlConfig)
         tunnel_addr,
         tunnel_port,
         event_script: file.event_script.clone(),
+        wss_path,
+        wss_headers,
         managed: None,
     };
     let ctrl_config = CtrlConfig {
@@ -634,6 +696,15 @@ network_code = "your_network_code"
 # 服务器地址列表(支持 quic / tcp / wss / dynamic) (必填)
 # dynamic 协议默认使用dns txt解析记录值，也支持填入http(s)接口如 dynamic://https://example.com/servers，接口返回换行符分隔的服务器地址列表
 server = ["quic://1.2.3.4:29872"]
+
+# wss 握手路径（缺省 "/"），仅 server 使用 wss:// 时生效；
+# 用于挂在要求路径前缀的 HTTP 反代后面（反代需放行 WebSocket Upgrade）
+# wss_path = "/vnts/"
+
+# wss 握手附加 header，每项格式为 "Name: Value"，可重复；
+# 用于穿越按 cookie 寻址的 HTTP 反代（如沙盒 webview 网关，
+# 每个请求都要带 x-cs-sandbox-id / x-cs-sandbox-port 两个 cookie）
+# wss_headers = ["Cookie: x-cs-sandbox-id=<id>; x-cs-sandbox-port=9000"]
 
 # 可直连节点地址列表
 # 不带协议时同时尝试 TCP 和 UDP；也可用 tcp:// 或 udp:// 指定协议
@@ -1129,5 +1200,79 @@ mod tests {
         let (config, _) = build_config_from_args_and_file(None, Some(file)).unwrap();
         assert!(config.allow_ikev2);
         assert!(config.allow_wireguard);
+    }
+
+    /// wss path/header：CLI 优先于文件配置，文件可独立兜底；
+    /// header 形如 "Name: Value"，缺冒号/名称为空必须报错而非静默丢弃
+    #[test]
+    fn test_wss_path_and_header_cli_and_file_precedence() {
+        let args = Args::try_parse_from([
+            "vnt",
+            "-s",
+            "wss://webview.example.com/vnts/",
+            "-n",
+            "test-net",
+            "--wss-path",
+            "/gateway/",
+            "--wss-header",
+            "Cookie: a=1; b=2",
+            "--wss-header",
+            "X-Extra: v",
+        ])
+        .unwrap();
+        let (config, _) = build_from_args_only(args).unwrap();
+        assert_eq!(config.wss_path, "/gateway/");
+        assert_eq!(
+            config.wss_headers,
+            vec![
+                ("Cookie".to_string(), "a=1; b=2".to_string()),
+                ("X-Extra".to_string(), "v".to_string()),
+            ]
+        );
+
+        let file: FileConfig = toml::from_str(
+            "server = [\"wss://webview.example.com:443\"]\nnetwork_code = \"test-net\"\nwss_path = \"/from-file/\"\nwss_headers = [\"Cookie: file=1\"]",
+        )
+        .unwrap();
+        let (config, _) = build_config_from_args_and_file(None, Some(file)).unwrap();
+        assert_eq!(config.wss_path, "/from-file/");
+        assert_eq!(
+            config.wss_headers,
+            vec![("Cookie".to_string(), "file=1".to_string())]
+        );
+
+        // CLI 出现即整体覆盖文件配置（与 server/peer_address 等多值字段一致的优先级语义）
+        let args = Args::try_parse_from([
+            "vnt",
+            "-s",
+            "wss://webview.example.com/vnts/",
+            "-n",
+            "test-net",
+            "--wss-header",
+            "Cookie: cli=1",
+        ])
+        .unwrap();
+        let file: FileConfig = toml::from_str(
+            "server = [\"wss://webview.example.com:443\"]\nnetwork_code = \"test-net\"\nwss_path = \"/from-file/\"\nwss_headers = [\"Cookie: file=1\"]",
+        )
+        .unwrap();
+        let (config, _) = build_config_from_args_and_file(Some(args), Some(file)).unwrap();
+        assert_eq!(config.wss_path, "/from-file/");
+        assert_eq!(
+            config.wss_headers,
+            vec![("Cookie".to_string(), "cli=1".to_string())]
+        );
+
+        let bad: FileConfig = toml::from_str(
+            "server = [\"wss://h:443\"]\nnetwork_code = \"n\"\nwss_headers = [\"no-colon\"]",
+        )
+        .unwrap();
+        assert!(build_config_from_args_and_file(None, Some(bad)).is_err());
+
+        let empty_name: FileConfig = toml::from_str(
+            "server = [\"wss://h:443\"]\nnetwork_code = \"n\"\nwss_headers = [\" : v\"]",
+        )
+        .unwrap();
+        assert!(build_config_from_args_and_file(None, Some(empty_name)).is_err());
     }
 }

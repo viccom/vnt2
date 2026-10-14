@@ -221,6 +221,10 @@ impl Subscription {
                 default_interface: None,
                 managed: None,
                 client_instance_id: std::sync::Arc::new(random_nonce()),
+                // 订阅协议 payload 暂无 header 位置，订阅链路本期不支持；
+                // 需要穿越 cookie 寻址反代时请用 --wss-path/--wss-header 静态配置
+                wss_path: String::new(),
+                wss_headers: Vec::new(),
             };
             let configs = match resolver.to_connect_config().await {
                 Ok(value) => value,
@@ -352,6 +356,10 @@ async fn run_subscription_connection(
         default_interface: None,
         managed: None,
         client_instance_id: Arc::new(random_nonce()),
+        // 订阅协议 payload 暂无 header 位置，订阅链路本期不支持；
+        // 需要穿越 cookie 寻址反代时请用 --wss-path/--wss-header 静态配置
+        wss_path: String::new(),
+        wss_headers: Vec::new(),
     };
     let configs = resolver.to_connect_config().await?;
     let mut last_error = None;

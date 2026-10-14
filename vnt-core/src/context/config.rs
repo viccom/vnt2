@@ -570,6 +570,11 @@ pub struct Config {
     /// Opaque server-management credential. Its Debug implementation is
     /// deliberately redacted.
     pub managed: Option<ManagedRegistration>,
+    /// wss 握手路径（空串归一为 "/"），仅 wss 协议生效
+    pub wss_path: String,
+    /// wss 握手附加 header（"K: V" 解析后的键值对），
+    /// 用于穿越要求 cookie 寻址的 HTTP 反代（如沙盒 webview 网关）
+    pub wss_headers: Vec<(String, String)>,
 }
 
 #[derive(Clone)]
@@ -717,6 +722,17 @@ impl Config {
         insert_string_array(&mut table, "port_mapping", &self.port_mapping);
         insert_string_array(&mut table, "udp_stun", &self.udp_stun);
         insert_string_array(&mut table, "tcp_stun", &self.tcp_stun);
+        if !self.wss_path.is_empty() {
+            table.insert("wss_path".into(), self.wss_path.clone().into());
+        }
+        if !self.wss_headers.is_empty() {
+            let headers: Vec<String> = self
+                .wss_headers
+                .iter()
+                .map(|(name, value)| format!("{name}: {value}"))
+                .collect();
+            table.insert("wss_headers".into(), headers.into());
+        }
         for (key, value) in [
             ("no_punch", self.no_punch),
             ("no_broadcast", self.no_broadcast),
@@ -892,6 +908,8 @@ impl Config {
             default_interface,
             managed: self.managed.clone(),
             client_instance_id,
+            wss_path: self.wss_path.clone(),
+            wss_headers: self.wss_headers.clone(),
         }
     }
 }

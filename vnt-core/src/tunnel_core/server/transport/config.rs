@@ -25,6 +25,11 @@ pub(crate) struct ConnectRegConfig {
     pub default_interface: Option<LocalInterface>,
     pub managed: Option<crate::context::config::ManagedRegistration>,
     pub client_instance_id: Arc<Vec<u8>>,
+    /// wss 握手路径（空串归一为 "/"），仅 Wss 协议生效
+    pub wss_path: String,
+    /// wss 握手附加 header（"K: V" 解析后的键值对），
+    /// 用于穿越要求 cookie 寻址的 HTTP 反代（如沙盒 webview 网关）
+    pub wss_headers: Vec<(String, String)>,
 }
 #[derive(Debug, Clone)]
 pub(crate) struct ConnectConfig {
@@ -33,6 +38,8 @@ pub(crate) struct ConnectConfig {
     pub server_domain: String,
     pub cert_mode: CertValidationMode,
     pub default_interface: Option<LocalInterface>,
+    pub wss_path: String,
+    pub wss_headers: Vec<(String, String)>,
 }
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum ProtocolType {
@@ -199,6 +206,8 @@ impl ConnectRegConfig {
                 server_domain: host.to_owned(),
                 cert_mode: self.cert_mode.clone(),
                 default_interface: self.default_interface.clone(),
+                wss_path: self.wss_path.clone(),
+                wss_headers: self.wss_headers.clone(),
             }));
         }
         if connect_configs.is_empty() {
@@ -274,6 +283,8 @@ mod tests {
             default_interface: None,
             managed: None,
             client_instance_id: Arc::new(vec![1; 32]),
+            wss_path: String::new(),
+            wss_headers: Vec::new(),
         };
 
         assert_eq!(
