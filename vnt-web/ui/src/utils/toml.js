@@ -33,11 +33,34 @@ export const emptyFormData = () => ({
   password: "",
   cert_mode: "skip",
   fingerprint: "",
+  wss_path: "",
+  wss_headers: [],
   udp_stun: [],
   tcp_stun: [],
   tunnel_addr: [],
   event_script: "",
 });
+
+// TOML basic string 转义/反转义：wss 路径与 header 值可能含引号、反斜杠
+// 等特殊字符，直接拼接会生成非法 TOML（review 实测复现）
+const tomlEscapeString = (value) =>
+  String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\t/g, "\\t")
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n");
+
+const tomlUnescapeString = (value) =>
+  value.replace(/\\(["\\trn])/g, (_, c) =>
+    { const map = { '"': '"', "\\": "\\", t: "\t", r: "\r", n: "\n" }; return map[c]; }
+  );
+
+// 解析 TOML 数组字面量内的字符串列表（支持转义引号）
+const parseTomlStringArray = (raw) => {
+  const items = raw.match(/"((?:[^"\\]|\\.)*)"/g);
+  return items ? items.map((s) => tomlUnescapeString(s.slice(1, -1))) : [];
+};
 
 // 从TOML解析到表单
 export const parseTomlToForm = (toml) => {
@@ -45,7 +68,18 @@ export const parseTomlToForm = (toml) => {
   let legacyTunnelPort = null;
 
   const lines = toml.split("\n");
+  // TOML 允许数组跨行书写；先把未闭合 '[' 的行与后续行合并成单行，
+  // 否则逐行正则会把多行数组解析成空值（表单保存即丢失配置）
+  const merged = [];
   for (const line of lines) {
+    const prev = merged.length > 0 ? merged[merged.length - 1].trim() : null;
+    if (prev !== null && !prev.startsWith("#") && prev.includes("[") && !prev.includes("]")) {
+      merged[merged.length - 1] += " " + line.trim();
+    } else {
+      merged.push(line);
+    }
+  }
+  for (const line of merged) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
 
@@ -170,6 +204,12 @@ export const parseTomlToForm = (toml) => {
           data.cert_mode = value;
         }
       }
+    } else if (trimmed.startsWith("wss_path")) {
+      const match = trimmed.match(/wss_path\s*=\s*"((?:[^"\\]|\\.)*)"/);
+      if (match) data.wss_path = tomlUnescapeString(match[1]);
+    } else if (trimmed.startsWith("wss_headers")) {
+      const match = trimmed.match(/wss_headers\s*=\s*\[(.*)\]/);
+      if (match) data.wss_headers = parseTomlStringArray(match[1]);
     } else if (trimmed.startsWith("udp_stun")) {
       const match = trimmed.match(/udp_stun\s*=\s*\[(.*)\]/);
       if (match) {
@@ -399,6 +439,17 @@ export const formToToml = (formData) => {
   if (tcpStuns.length > 0) {
     toml += "\n# 自定义TCP STUN地址，不设置则用默认stun\n";
     toml += `tcp_stun = [${tcpStuns.map((s) => `"${s}"`).join(", ")}]\n`;
+  }
+
+  const wssPath = (formData.wss_path || "").trim();
+  if (wssPath) {
+    toml += "\n# wss 握手路径（仅 server 使用 wss:// 时生效）\n";
+    toml += `wss_path = "${tomlEscapeString(wssPath)}"\n`;
+  }
+  const wssHeaders = formData.wss_headers.filter((s) => s.trim());
+  if (wssHeaders.length > 0) {
+    toml += "\n# wss 握手附加 header，每项格式 \"Name: Value\"（穿越按 cookie 寻址的反代）\n";
+    toml += `wss_headers = [${wssHeaders.map((s) => `"${tomlEscapeString(s)}"`).join(", ")}]\n`;
   }
 
   return toml;

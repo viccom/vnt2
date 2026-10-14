@@ -10,7 +10,19 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
-#[derive(Debug, Clone)]
+/// Debug 辅助：wss 附加 header 的 value 可能是反代寻址凭证（如 Cookie），
+/// 打印时只保留 name、对 value 全量打码（与 managed 凭证 redact 同等标准）
+struct DebugRedactedWssHeaders<'a>(&'a [(String, String)]);
+
+impl fmt::Debug for DebugRedactedWssHeaders<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(name, _)| (name, "REDACTED")))
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct ConnectRegConfig {
     pub server_addr: ProtocolAddress,
     pub cert_mode: CertValidationMode,
@@ -25,14 +37,57 @@ pub(crate) struct ConnectRegConfig {
     pub default_interface: Option<LocalInterface>,
     pub managed: Option<crate::context::config::ManagedRegistration>,
     pub client_instance_id: Arc<Vec<u8>>,
+    /// wss 握手路径（空串归一为 "/"），仅 Wss 协议生效
+    pub wss_path: String,
+    /// wss 握手附加 header（"K: V" 解析后的键值对），
+    /// 用于穿越要求 cookie 寻址的 HTTP 反代（如沙盒 webview 网关）
+    pub wss_headers: Vec<(String, String)>,
 }
-#[derive(Debug, Clone)]
+
+impl fmt::Debug for ConnectRegConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectRegConfig")
+            .field("server_addr", &self.server_addr)
+            .field("cert_mode", &self.cert_mode)
+            .field("network_code", &self.network_code)
+            .field("device_id", &self.device_id)
+            .field("identity", &self.identity)
+            .field("ip", &self.ip)
+            .field("key_sign", &self.key_sign)
+            .field("ip_variable", &self.ip_variable)
+            .field("allow_ikev2", &self.allow_ikev2)
+            .field("allow_wireguard", &self.allow_wireguard)
+            .field("default_interface", &self.default_interface)
+            .field("managed", &self.managed)
+            .field("client_instance_id", &self.client_instance_id)
+            .field("wss_path", &self.wss_path)
+            .field("wss_headers", &DebugRedactedWssHeaders(&self.wss_headers))
+            .finish()
+    }
+}
+#[derive(Clone)]
 pub(crate) struct ConnectConfig {
     pub protocol_type: ProtocolType,
     pub server_addr: SocketAddr,
     pub server_domain: String,
     pub cert_mode: CertValidationMode,
     pub default_interface: Option<LocalInterface>,
+    pub wss_path: String,
+    pub wss_headers: Vec<(String, String)>,
+}
+
+impl fmt::Debug for ConnectConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectConfig")
+            .field("protocol_type", &self.protocol_type)
+            .field("server_addr", &self.server_addr)
+            .field("server_domain", &self.server_domain)
+            .field("cert_mode", &self.cert_mode)
+            .field("default_interface", &self.default_interface)
+            .field("wss_path", &self.wss_path)
+            .field("wss_headers", &DebugRedactedWssHeaders(&self.wss_headers))
+            .finish()
+    }
 }
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum ProtocolType {
@@ -46,12 +101,16 @@ pub enum ProtocolType {
 pub struct ProtocolAddress {
     pub protocol_type: ProtocolType,
     pub address: String,
+    /// wss 地址自带的路径（`wss://host:port/path` 中的 path，含 query），
+    /// 作为 wss 握手路径的默认值；显式 wss_path 配置优先。其余协议恒为 None。
+    pub path: Option<String>,
 }
 impl Default for ProtocolAddress {
     fn default() -> Self {
         Self {
             protocol_type: ProtocolType::default(),
             address: "127.0.0.1:29872".to_string(),
+            path: None,
         }
     }
 }
@@ -60,9 +119,35 @@ impl FromStr for ProtocolAddress {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (protocol_type, server_addr) = parse_server(s)?;
+        // wss 地址支持 host:port/path 形式：路径剥离保存（穿越路径前缀反代），
+        // 其余协议不分割（地址中不该出现路径，出现也按 host 原样保留、由
+        // split_host_port/DNS 报错）
+        let (address, path) = if protocol_type == ProtocolType::Wss {
+            let (host, path) = match server_addr.split_once('/') {
+                Some((host, path)) => (host.to_string(), Some(format!("/{path}"))),
+                None => (server_addr, None),
+            };
+            // wss:// 与 https 一样默认 443。判断是否已带端口：
+            // 有 ']' 看 ']' 之后（[v6] / [v6]:port）；无括号看是否含 ':'
+            // （域名:port 带端口；裸 IPv6 无括号属非法输入，含 ':' 被视为
+            // 带端口保留原样，由 split_host_port 报错暴露）
+            let has_port = match host.rfind(']') {
+                Some(idx) => host[idx + 1..].contains(':'),
+                None => host.contains(':'),
+            };
+            let host = if has_port {
+                host
+            } else {
+                format!("{host}:443")
+            };
+            (host, path)
+        } else {
+            (server_addr, None)
+        };
         Ok(Self {
             protocol_type,
-            address: server_addr,
+            address,
+            path,
         })
     }
 }
@@ -74,7 +159,8 @@ impl fmt::Display for ProtocolAddress {
             ProtocolType::Wss => "wss://",
             ProtocolType::Dynamic => "dynamic://",
         };
-        write!(f, "{}{}", prefix, self.address)
+        let path = self.path.as_deref().unwrap_or("");
+        write!(f, "{}{}{}", prefix, self.address, path)
     }
 }
 pub fn parse_server(val: &str) -> Result<(ProtocolType, String), String> {
@@ -170,8 +256,21 @@ impl ConnectRegConfig {
             v => vec![(v, self.server_addr.address.to_string())],
         };
 
+        // 显式 wss_path 配置优先；否则用 wss 地址自带路径（parse 时保存，
+        // dynamic 发现的地址不支持路径）
+        let addr_wss_path = if self.server_addr.protocol_type == ProtocolType::Wss {
+            self.server_addr.path.clone()
+        } else {
+            None
+        };
+
         let mut connect_configs = Vec::new();
         for (protocol_type, server_domain) in server_domains {
+            let effective_wss_path = if self.wss_path.is_empty() {
+                addr_wss_path.clone().unwrap_or_default()
+            } else {
+                self.wss_path.clone()
+            };
             // DNS 只负责解析 IP，端口由调用方从地址中解析后自行拼装
             let (host, port) = match crate::utils::addr::split_host_port(&server_domain) {
                 Ok(v) => v,
@@ -199,6 +298,8 @@ impl ConnectRegConfig {
                 server_domain: host.to_owned(),
                 cert_mode: self.cert_mode.clone(),
                 default_interface: self.default_interface.clone(),
+                wss_path: effective_wss_path.clone(),
+                wss_headers: self.wss_headers.clone(),
             }));
         }
         if connect_configs.is_empty() {
@@ -274,6 +375,8 @@ mod tests {
             default_interface: None,
             managed: None,
             client_instance_id: Arc::new(vec![1; 32]),
+            wss_path: String::new(),
+            wss_headers: Vec::new(),
         };
 
         assert_eq!(
@@ -349,5 +452,116 @@ mod tests {
             parse_server("TCP://Example.com:29872"),
             Ok((ProtocolType::TlsTcp, "Example.com:29872".to_string()))
         );
+    }
+
+    /// wss 地址支持 host:port/path 形式：路径剥离保存到 path 字段，
+    /// 作为 wss 握手路径的默认值（穿越路径前缀反代）；其余协议不分割。
+    /// Display 必须还原完整地址，保证配置序列化 roundtrip。
+    #[test]
+    fn parse_wss_address_extracts_path() {
+        let addr: ProtocolAddress = "wss://Example.com:443/vnts/".parse().unwrap();
+        assert_eq!(addr.address, "Example.com:443");
+        assert_eq!(addr.path.as_deref(), Some("/vnts/"));
+        assert_eq!(addr.to_string(), "wss://Example.com:443/vnts/");
+
+        let no_path: ProtocolAddress = "wss://Example.com:443".parse().unwrap();
+        assert_eq!(no_path.address, "Example.com:443");
+        assert_eq!(no_path.path, None);
+        assert_eq!(no_path.to_string(), "wss://Example.com:443");
+
+        // 非协议默认端口的路径同样剥离；query 一并保留在 path 中
+        let with_query: ProtocolAddress = "wss://Example.com:8443/gw?p=1".parse().unwrap();
+        assert_eq!(with_query.address, "Example.com:8443");
+        assert_eq!(with_query.path.as_deref(), Some("/gw?p=1"));
+        assert_eq!(with_query.to_string(), "wss://Example.com:8443/gw?p=1");
+
+        // wss 省略端口时默认 443（与 wss:// URL 语义一致）
+        let no_port: ProtocolAddress = "wss://Example.com/vnts/".parse().unwrap();
+        assert_eq!(no_port.address, "Example.com:443");
+        assert_eq!(no_port.path.as_deref(), Some("/vnts/"));
+        assert_eq!(no_port.to_string(), "wss://Example.com:443/vnts/");
+
+        let v6_no_port: ProtocolAddress = "wss://[2001:db8::1]/gw".parse().unwrap();
+        assert_eq!(v6_no_port.address, "[2001:db8::1]:443");
+        assert_eq!(v6_no_port.to_string(), "wss://[2001:db8::1]:443/gw");
+
+        // 其余协议不分割路径（tcp/quic 地址无路径语义，host 部分原样保留）
+        let tcp: ProtocolAddress = "tcp://Example.com:29872".parse().unwrap();
+        assert_eq!(tcp.path, None);
+        assert_eq!(tcp.to_string(), "tcp://Example.com:29872");
+    }
+
+    /// wss_path 优先级：显式配置 > 地址自带路径 > 空串；
+    /// 非 wss 协议时地址 path 恒为 None，不参与优先级
+    #[tokio::test]
+    async fn wss_path_precedence_explicit_over_address_path() {
+        let build = |server: &str, wss_path: &str| {
+            let server = server.to_string();
+            let wss_path = wss_path.to_string();
+            let shared_identity =
+                SharedNodeIdentity::new(crate::protocol::client_message::NodeIdentityTemplate {
+                    name: "device".to_string(),
+                    version: "test".to_string(),
+                    network_code: "test".to_string(),
+                    advertised_subnets: Vec::new(),
+                });
+            async move {
+                ConnectRegConfig {
+                    server_addr: server.parse().unwrap(),
+                    cert_mode: CertValidationMode::default(),
+                    network_code: "net".to_string(),
+                    device_id: "dev".to_string(),
+                    identity: shared_identity,
+                    ip: SharedNetworkAddr::default(),
+                    key_sign: None,
+                    ip_variable: false,
+                    allow_ikev2: false,
+                    allow_wireguard: false,
+                    default_interface: None,
+                    managed: None,
+                    client_instance_id: Arc::new(vec![1; 32]),
+                    wss_path,
+                    wss_headers: Vec::new(),
+                }
+                .to_connect_config()
+                .await
+                .unwrap()
+            }
+        };
+
+        // 显式 wss_path 覆盖地址自带路径
+        let configs = build("wss://Example.com:443/addr-path/", "/explicit/").await;
+        assert!(configs.iter().all(|c| c.wss_path == "/explicit/"));
+
+        // 无显式配置时用地址自带路径
+        let configs = build("wss://Example.com:443/addr-path/", "").await;
+        assert!(configs.iter().all(|c| c.wss_path == "/addr-path/"));
+
+        // 两者皆无时归一为空串（内核 build_wss_request 再归一为 "/"）
+        let configs = build("wss://Example.com:443", "").await;
+        assert!(configs.iter().all(|c| c.wss_path.is_empty()));
+
+        // 非 wss 协议：显式 wss_path 仍透传（仅 Wss 消费），地址无 path
+        let configs = build("tcp://Example.com:29872", "/explicit/").await;
+        assert!(configs.iter().all(|c| c.wss_path == "/explicit/"));
+    }
+
+    /// wss 附加 header 是反代寻址凭证（如 Cookie），Debug 打印必须
+    /// 对 value 全量打码、仅保留 name（review 发现的日志泄露修复）
+    #[test]
+    fn debug_redacts_wss_header_values() {
+        let config = ConnectConfig {
+            protocol_type: ProtocolType::Wss,
+            server_addr: "1.2.3.4:443".parse().unwrap(),
+            server_domain: "example.com".to_string(),
+            cert_mode: Default::default(),
+            default_interface: None,
+            wss_path: "/vnts/".to_string(),
+            wss_headers: vec![("Cookie".to_string(), "secret-credential".to_string())],
+        };
+        let printed = format!("{:?}", config);
+        assert!(!printed.contains("secret-credential"), "value must be redacted: {printed}");
+        assert!(printed.contains("Cookie"), "header name must stay visible");
+        assert!(printed.contains("REDACTED"));
     }
 }

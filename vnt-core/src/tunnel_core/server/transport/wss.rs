@@ -87,7 +87,12 @@ pub async fn connect_wss(config: &ConnectConfig) -> anyhow::Result<WssStream> {
     if let Err(e) = tcp_stream.set_nodelay(true) {
         log::error!("Failed to set TCP_NODELAY: {}", e);
     }
-    let url = wss_url(&server_name, server_addr.port());
+    let request = build_wss_request(
+        &server_name,
+        server_addr.port(),
+        &config.wss_path,
+        &config.wss_headers,
+    )?;
 
     let dns_name = server_name
         .try_into()
@@ -98,35 +103,169 @@ pub async fn connect_wss(config: &ConnectConfig) -> anyhow::Result<WssStream> {
         .await
         .context("Failed to perform TLS handshake")?;
 
-    let (ws_stream, _response) = client_async(url, tls_stream)
+    let (ws_stream, _response) = client_async(request, tls_stream)
         .await
         .context("Failed to perform WebSocket handshake")?;
 
     Ok(ws_stream)
 }
 
-/// Build the WebSocket URL authority from the configured server name.
+/// Build the WebSocket handshake request from the configured server name,
+/// path and extra headers.
 ///
 /// `ConnectConfig::server_name` intentionally stores IPv6 literals without
 /// brackets so it can be used as a TLS `ServerName`. URLs, however, require
 /// brackets around an IPv6 host and must include the configured port.
-fn wss_url(server_name: &str, port: u16) -> String {
+///
+/// Extra headers let the client traverse HTTP reverse proxies that require
+/// cookie-based addressing (e.g. sandbox webview gateways): an empty path
+/// normalizes to `/`, and malformed header names/values are rejected up
+/// front instead of failing mid-handshake.
+fn build_wss_request(
+    server_name: &str,
+    port: u16,
+    path: &str,
+    headers: &[(String, String)],
+) -> anyhow::Result<http::Request<()>> {
+    let path = if path.is_empty() { "/" } else { path };
     let host = if server_name.contains(':') {
         format!("[{server_name}]")
     } else {
         server_name.to_owned()
     };
-    format!("wss://{host}:{port}")
+    let uri: http::Uri = format!("wss://{host}:{port}{path}")
+        .parse()
+        .context("Invalid WebSocket URL")?;
+    let authority = uri
+        .authority()
+        .map(|a| a.as_str().to_string())
+        .unwrap_or_default();
+    let mut request = http::Request::builder()
+        .uri(uri)
+        .body(())
+        .context("Failed to build WebSocket request")?;
+    {
+        let request_headers = request.headers_mut();
+        // 用户自定义 header 用 append 写入：同名 header 保留多值（HTTP 合并语义，
+        // 服务端普遍按逗号连接），分两次写 Cookie 不会静默丢失
+        for (name, value) in headers {
+            let header_name = http::HeaderName::from_bytes(name.as_bytes())
+                .with_context(|| format!("Invalid header name: {name}"))?;
+            let header_value = http::HeaderValue::from_str(value)
+                .with_context(|| format!("Invalid header value for header {name}"))?;
+            request_headers.append(header_name, header_value);
+        }
+        // tungstenite generate_request 要求请求自带全部 WS 握手头
+        // （IntoClientRequest for http::Request<()> 原样返回，不自动生成）；
+        // 这四个头强制写入（覆盖用户值）保证握手有效；Host 用户可自定义
+        // （反代后端伪装场景），缺省取 URI authority
+        let defaults = [
+            (http::header::CONNECTION, "Upgrade".to_string()),
+            (http::header::UPGRADE, "websocket".to_string()),
+            (http::header::SEC_WEBSOCKET_VERSION, "13".to_string()),
+            (
+                http::header::SEC_WEBSOCKET_KEY,
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            ),
+        ];
+        for (name, value) in defaults {
+            let header_value = http::HeaderValue::from_str(&value).expect("static header value");
+            request_headers.insert(name, header_value);
+        }
+        if !request_headers.contains_key(http::header::HOST) && !authority.is_empty() {
+            let header_value =
+                http::HeaderValue::from_str(&authority).expect("authority header value");
+            request_headers.insert(http::header::HOST, header_value);
+        }
+    }
+    Ok(request)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::wss_url;
+    use super::build_wss_request;
 
     #[test]
-    fn url_preserves_port_and_brackets_ipv6_literal() {
-        assert_eq!(wss_url("example.com", 8443), "wss://example.com:8443");
-        assert_eq!(wss_url("192.0.2.1", 8443), "wss://192.0.2.1:8443");
-        assert_eq!(wss_url("2001:db8::1", 8443), "wss://[2001:db8::1]:8443");
+    fn request_preserves_port_and_brackets_ipv6_literal() {
+        let request = build_wss_request("example.com", 8443, "/", &[]).unwrap();
+        assert_eq!(request.uri(), "wss://example.com:8443/");
+        let request = build_wss_request("192.0.2.1", 8443, "/", &[]).unwrap();
+        assert_eq!(request.uri(), "wss://192.0.2.1:8443/");
+        let request = build_wss_request("2001:db8::1", 8443, "/", &[]).unwrap();
+        assert_eq!(request.uri(), "wss://[2001:db8::1]:8443/");
+    }
+
+    #[test]
+    fn request_appends_path_and_headers() {
+        let headers = vec![(
+            "Cookie".to_string(),
+            "x-cs-sandbox-id=abc; x-cs-sandbox-port=9000".to_string(),
+        )];
+        let request = build_wss_request("webview.example.com", 443, "/vnts/", &headers).unwrap();
+        assert_eq!(request.uri(), "wss://webview.example.com:443/vnts/");
+        assert_eq!(
+            request
+                .headers()
+                .get("cookie")
+                .and_then(|value| value.to_str().ok()),
+            Some("x-cs-sandbox-id=abc; x-cs-sandbox-port=9000")
+        );
+    }
+
+    /// 同名 header 用 append 保留多值（HTTP 合并语义）：
+    /// 分两次写 Cookie 不能静默覆盖（review 发现的回退风险）
+    #[test]
+    fn request_keeps_duplicate_header_names() {
+        let headers = vec![
+            ("Cookie".to_string(), "a=1".to_string()),
+            ("Cookie".to_string(), "b=2".to_string()),
+        ];
+        let request = build_wss_request("example.com", 443, "/", &headers).unwrap();
+        let cookies: Vec<&str> = request
+            .headers()
+            .get_all("cookie")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect();
+        assert_eq!(cookies, vec!["a=1", "b=2"]);
+    }
+
+    #[test]
+    fn request_normalizes_empty_path_to_root() {
+        let request = build_wss_request("example.com", 8443, "", &[]).unwrap();
+        assert_eq!(request.uri(), "wss://example.com:8443/");
+    }
+
+    /// tungstenite 的 generate_request 要求请求自带全部 WS 握手头
+    /// （Host/Connection/Upgrade/Sec-WebSocket-Version/Sec-WebSocket-Key），
+    /// IntoClientRequest for http::Request<()> 原样返回不补头——必须在此补全，
+    /// 否则握手被服务器以缺 sec-websocket-key 拒绝
+    #[test]
+    fn request_includes_websocket_handshake_headers() {
+        let request = build_wss_request("example.com", 8443, "/", &[]).unwrap();
+        let headers = request.headers();
+        assert_eq!(headers.get("host").unwrap(), "example.com:8443");
+        assert_eq!(headers.get("connection").unwrap(), "Upgrade");
+        assert_eq!(headers.get("upgrade").unwrap(), "websocket");
+        assert_eq!(headers.get("sec-websocket-version").unwrap(), "13");
+        let key = headers.get("sec-websocket-key").unwrap();
+        assert!(!key.is_empty(), "Sec-WebSocket-Key must be generated");
+
+        // 用户自定义 Host 优先（反代后端伪装场景），缺省取 URI authority
+        let custom_host = vec![("Host".to_string(), "gateway.internal".to_string())];
+        let request = build_wss_request("example.com", 8443, "/", &custom_host).unwrap();
+        assert_eq!(request.headers().get("host").unwrap(), "gateway.internal");
+    }
+
+    #[test]
+    fn request_rejects_invalid_header_name() {
+        let headers = vec![("Bad Header".to_string(), "value".to_string())];
+        assert!(build_wss_request("example.com", 8443, "/", &headers).is_err());
+    }
+
+    #[test]
+    fn request_rejects_invalid_header_value() {
+        let headers = vec![("Cookie".to_string(), "bad\nvalue".to_string())];
+        assert!(build_wss_request("example.com", 8443, "/", &headers).is_err());
     }
 }
