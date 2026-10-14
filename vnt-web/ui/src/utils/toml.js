@@ -33,6 +33,8 @@ export const emptyFormData = () => ({
   password: "",
   cert_mode: "skip",
   fingerprint: "",
+  wss_path: "",
+  wss_headers: [],
   udp_stun: [],
   tcp_stun: [],
   tunnel_addr: [],
@@ -169,6 +171,15 @@ export const parseTomlToForm = (toml) => {
         } else {
           data.cert_mode = value;
         }
+      }
+    } else if (trimmed.startsWith("wss_path")) {
+      const match = trimmed.match(/wss_path\s*=\s*"([^"]*)"/);
+      if (match) data.wss_path = match[1];
+    } else if (trimmed.startsWith("wss_headers")) {
+      const match = trimmed.match(/wss_headers\s*=\s*\[(.*)\]/);
+      if (match) {
+        const items = match[1].match(/"([^"]*)"/g);
+        if (items) data.wss_headers = items.map((s) => s.replace(/"/g, ""));
       }
     } else if (trimmed.startsWith("udp_stun")) {
       const match = trimmed.match(/udp_stun\s*=\s*\[(.*)\]/);
@@ -399,6 +410,17 @@ export const formToToml = (formData) => {
   if (tcpStuns.length > 0) {
     toml += "\n# 自定义TCP STUN地址，不设置则用默认stun\n";
     toml += `tcp_stun = [${tcpStuns.map((s) => `"${s}"`).join(", ")}]\n`;
+  }
+
+  const wssPath = (formData.wss_path || "").trim();
+  if (wssPath) {
+    toml += "\n# wss 握手路径（仅 server 使用 wss:// 时生效）\n";
+    toml += `wss_path = "${wssPath}"\n`;
+  }
+  const wssHeaders = formData.wss_headers.filter((s) => s.trim());
+  if (wssHeaders.length > 0) {
+    toml += "\n# wss 握手附加 header，每项格式 \"Name: Value\"（穿越按 cookie 寻址的反代）\n";
+    toml += `wss_headers = [${wssHeaders.map((s) => `"${s}"`).join(", ")}]\n`;
   }
 
   return toml;

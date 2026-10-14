@@ -383,6 +383,41 @@ const sectionChevronClass = (expanded) =>
               </div>
               <div class="mt-4">
                 <label class="mb-2 flex flex-wrap items-center text-sm font-medium text-slate-600 dark:text-slate-300">
+                  wss 握手路径 <span class="text-xs text-slate-500 ml-2">仅 server 使用 wss:// 时生效，缺省 /</span>
+                </label>
+                <input v-model="formData.wss_path" type="text" placeholder="例如: /vnts/" class="input" />
+              </div>
+              <div class="mt-4">
+                <label class="mb-2 flex flex-wrap items-center text-sm font-medium text-slate-600 dark:text-slate-300">
+                  wss 附加 Header <span class="text-xs text-slate-500 ml-2">格式 "Name: Value"，用于穿越按 cookie 寻址的反代</span>
+                </label>
+                <div class="space-y-2">
+                  <div v-for="(header, idx) in formData.wss_headers" :key="idx" class="flex gap-2">
+                    <input v-model="formData.wss_headers[idx]" type="text" placeholder="例如: Cookie: x-cs-sandbox-id=xxx; x-cs-sandbox-port=9000" class="input flex-1" />
+                    <button @click="formData.wss_headers.splice(idx, 1)" :class="removeBtnClass">
+                      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                  <button
+                    @click="formData.wss_headers.push('')"
+                    :class="addBtnClass"
+                  >
+                    <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                    </svg>
+                    添加 Header
+                  </button>
+                </div>
+              </div>
+              <div class="mt-4">
+                <label class="mb-2 flex flex-wrap items-center text-sm font-medium text-slate-600 dark:text-slate-300">
                   可直连节点地址 <ConfigHelp :help="configHelp.peer_address" />
                   <span class="text-xs text-slate-500 ml-2">支持 ip:端口、tcp://、udp://、dynamic://</span>
                 </label>

@@ -519,11 +519,19 @@ pub struct StartConfig {
     pub tunnel_port: Option<u16>,
     #[serde(default)]
     pub event_script: Option<String>,
+    /// wss 握手路径（空串/缺省归一 "/"），仅 server 使用 wss:// 时生效
+    #[serde(default)]
+    pub wss_path: Option<String>,
+    /// wss 握手附加 header，每项格式为 "Name: Value"
+    #[serde(default)]
+    pub wss_headers: Vec<String>,
 }
 
 impl StartConfig {
     /// 本地配置的基础校验：与是否配置服务器无关的部分。
     fn validate_local(&self) -> anyhow::Result<()> {
+        parse_wss_path(self.wss_path.as_deref())?;
+        parse_wss_headers(&self.wss_headers)?;
         if self.legacy_no_tun == Some(true) {
             bail!("configuration key 'no_tun' was removed; use device_mode = \"no|tun|tap\"")
         }
@@ -2822,13 +2830,40 @@ fn convert_config(cfg: StartConfig) -> anyhow::Result<CoreConfig> {
         tunnel_addr: cfg.tunnel_addr,
         tunnel_port: cfg.tunnel_port,
         event_script: cfg.event_script,
-        // web UI 本期不透出 wss path/header 配置（StartConfig 无对应字段，
-        // 前端表单未加）；需要穿越 cookie 寻址反代时请用 CLI --wss-path/
-        // --wss-header 或配置文件的 wss_path/wss_headers 键
-        wss_path: String::new(),
-        wss_headers: Vec::new(),
+        wss_path: parse_wss_path(cfg.wss_path.as_deref())?,
+        wss_headers: parse_wss_headers(&cfg.wss_headers)?,
         managed: None,
     })
+}
+
+/// 规范化 wss 握手路径：None/空串归一为 "/"（与内核语义一致）
+fn parse_wss_path(raw: Option<&str>) -> anyhow::Result<String> {
+    let path = raw.unwrap_or("").trim();
+    if path.is_empty() {
+        return Ok("/".to_string());
+    }
+    if !path.starts_with('/') {
+        bail!("wss_path 必须以 / 开头，得到 {:?}", path);
+    }
+    Ok(path.to_string())
+}
+
+/// 解析 "Name: Value" 形式的 wss 附加 header；缺冒号或名称为空即报错，
+/// 具体 header 名/值合法性由 wss 握手构建时二次校验
+fn parse_wss_headers(headers_raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    headers_raw
+        .iter()
+        .map(|value| {
+            let (name, header_value) = value
+                .split_once(':')
+                .ok_or_else(|| anyhow!("invalid wss header '{}': expected 'Name: Value'", value))?;
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(anyhow!("invalid wss header '{}': empty header name", value));
+            }
+            Ok((name.to_string(), header_value.trim().to_string()))
+        })
+        .collect()
 }
 
 async fn shutdown_signal() -> anyhow::Result<()> {
@@ -3482,6 +3517,8 @@ network_code = "dongnet""#;
             tunnel_addr: Vec::new(),
             tunnel_port: None,
             event_script: None,
+            wss_path: None,
+            wss_headers: Vec::new(),
         }
     }
 
@@ -3569,6 +3606,44 @@ ip = "10.26.0.2"
             core.peer_address[2].to_string(),
             "dynamic://peers.example.com"
         );
+    }
+
+    /// wss 握手路径与附加 header（"Name: Value" 形式）应透传到内核配置；
+    /// 缺冒号或名称为空的 header 必须报错而非静默丢弃
+    #[test]
+    fn test_convert_config_passes_wss_path_and_headers() {
+        let mut config = new_test_config();
+        config.server = vec!["wss://gateway.example.com/vnts/".to_string()];
+        config.wss_path = Some("/vnts/".to_string());
+        config.wss_headers = vec![
+            "Cookie: x-cs-sandbox-id=abc; x-cs-sandbox-port=9000".to_string(),
+            "X-Extra: v".to_string(),
+        ];
+        let core = convert_config(config).unwrap();
+        assert_eq!(core.wss_path, "/vnts/");
+        assert_eq!(
+            core.wss_headers,
+            vec![
+                (
+                    "Cookie".to_string(),
+                    "x-cs-sandbox-id=abc; x-cs-sandbox-port=9000".to_string()
+                ),
+                ("X-Extra".to_string(), "v".to_string()),
+            ]
+        );
+
+        let mut config = new_test_config();
+        config.wss_headers = vec!["no-colon".to_string()];
+        assert!(convert_config(config).is_err());
+
+        let mut config = new_test_config();
+        config.wss_headers = vec![" : v".to_string()];
+        assert!(convert_config(config).is_err());
+
+        // 未配置时归一为 "/"（与内核 build_wss_request 的空串语义一致）
+        let core = convert_config(new_test_config()).unwrap();
+        assert_eq!(core.wss_path, "/");
+        assert!(core.wss_headers.is_empty());
     }
 
     #[test]
