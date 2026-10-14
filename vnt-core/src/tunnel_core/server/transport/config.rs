@@ -75,10 +75,24 @@ impl FromStr for ProtocolAddress {
         // 其余协议不分割（地址中不该出现路径，出现也按 host 原样保留、由
         // split_host_port/DNS 报错）
         let (address, path) = if protocol_type == ProtocolType::Wss {
-            match server_addr.split_once('/') {
+            let (host, path) = match server_addr.split_once('/') {
                 Some((host, path)) => (host.to_string(), Some(format!("/{path}"))),
                 None => (server_addr, None),
-            }
+            };
+            // wss:// 与 https 一样默认 443。判断是否已带端口：
+            // 有 ']' 看 ']' 之后（[v6] / [v6]:port）；无括号看是否含 ':'
+            // （域名:port 带端口；裸 IPv6 无括号属非法输入，含 ':' 被视为
+            // 带端口保留原样，由 split_host_port 报错暴露）
+            let has_port = match host.rfind(']') {
+                Some(idx) => host[idx + 1..].contains(':'),
+                None => host.contains(':'),
+            };
+            let host = if has_port {
+                host
+            } else {
+                format!("{host}:443")
+            };
+            (host, path)
         } else {
             (server_addr, None)
         };
@@ -412,6 +426,16 @@ mod tests {
         assert_eq!(with_query.address, "Example.com:8443");
         assert_eq!(with_query.path.as_deref(), Some("/gw?p=1"));
         assert_eq!(with_query.to_string(), "wss://Example.com:8443/gw?p=1");
+
+        // wss 省略端口时默认 443（与 wss:// URL 语义一致）
+        let no_port: ProtocolAddress = "wss://Example.com/vnts/".parse().unwrap();
+        assert_eq!(no_port.address, "Example.com:443");
+        assert_eq!(no_port.path.as_deref(), Some("/vnts/"));
+        assert_eq!(no_port.to_string(), "wss://Example.com:443/vnts/");
+
+        let v6_no_port: ProtocolAddress = "wss://[2001:db8::1]/gw".parse().unwrap();
+        assert_eq!(v6_no_port.address, "[2001:db8::1]:443");
+        assert_eq!(v6_no_port.to_string(), "wss://[2001:db8::1]:443/gw");
 
         // 其余协议不分割路径（tcp/quic 地址无路径语义，host 部分原样保留）
         let tcp: ProtocolAddress = "tcp://Example.com:29872".parse().unwrap();
