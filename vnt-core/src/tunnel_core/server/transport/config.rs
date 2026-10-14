@@ -10,7 +10,19 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
-#[derive(Debug, Clone)]
+/// Debug 辅助：wss 附加 header 的 value 可能是反代寻址凭证（如 Cookie），
+/// 打印时只保留 name、对 value 全量打码（与 managed 凭证 redact 同等标准）
+struct DebugRedactedWssHeaders<'a>(&'a [(String, String)]);
+
+impl fmt::Debug for DebugRedactedWssHeaders<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(name, _)| (name, "REDACTED")))
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct ConnectRegConfig {
     pub server_addr: ProtocolAddress,
     pub cert_mode: CertValidationMode,
@@ -31,7 +43,29 @@ pub(crate) struct ConnectRegConfig {
     /// 用于穿越要求 cookie 寻址的 HTTP 反代（如沙盒 webview 网关）
     pub wss_headers: Vec<(String, String)>,
 }
-#[derive(Debug, Clone)]
+
+impl fmt::Debug for ConnectRegConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectRegConfig")
+            .field("server_addr", &self.server_addr)
+            .field("cert_mode", &self.cert_mode)
+            .field("network_code", &self.network_code)
+            .field("device_id", &self.device_id)
+            .field("identity", &self.identity)
+            .field("ip", &self.ip)
+            .field("key_sign", &self.key_sign)
+            .field("ip_variable", &self.ip_variable)
+            .field("allow_ikev2", &self.allow_ikev2)
+            .field("allow_wireguard", &self.allow_wireguard)
+            .field("default_interface", &self.default_interface)
+            .field("managed", &self.managed)
+            .field("client_instance_id", &self.client_instance_id)
+            .field("wss_path", &self.wss_path)
+            .field("wss_headers", &DebugRedactedWssHeaders(&self.wss_headers))
+            .finish()
+    }
+}
+#[derive(Clone)]
 pub(crate) struct ConnectConfig {
     pub protocol_type: ProtocolType,
     pub server_addr: SocketAddr,
@@ -40,6 +74,20 @@ pub(crate) struct ConnectConfig {
     pub default_interface: Option<LocalInterface>,
     pub wss_path: String,
     pub wss_headers: Vec<(String, String)>,
+}
+
+impl fmt::Debug for ConnectConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectConfig")
+            .field("protocol_type", &self.protocol_type)
+            .field("server_addr", &self.server_addr)
+            .field("server_domain", &self.server_domain)
+            .field("cert_mode", &self.cert_mode)
+            .field("default_interface", &self.default_interface)
+            .field("wss_path", &self.wss_path)
+            .field("wss_headers", &DebugRedactedWssHeaders(&self.wss_headers))
+            .finish()
+    }
 }
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum ProtocolType {
@@ -441,5 +489,79 @@ mod tests {
         let tcp: ProtocolAddress = "tcp://Example.com:29872".parse().unwrap();
         assert_eq!(tcp.path, None);
         assert_eq!(tcp.to_string(), "tcp://Example.com:29872");
+    }
+
+    /// wss_path 优先级：显式配置 > 地址自带路径 > 空串；
+    /// 非 wss 协议时地址 path 恒为 None，不参与优先级
+    #[tokio::test]
+    async fn wss_path_precedence_explicit_over_address_path() {
+        let build = |server: &str, wss_path: &str| {
+            let server = server.to_string();
+            let wss_path = wss_path.to_string();
+            let shared_identity =
+                SharedNodeIdentity::new(crate::protocol::client_message::NodeIdentityTemplate {
+                    name: "device".to_string(),
+                    version: "test".to_string(),
+                    network_code: "test".to_string(),
+                    advertised_subnets: Vec::new(),
+                });
+            async move {
+                ConnectRegConfig {
+                    server_addr: server.parse().unwrap(),
+                    cert_mode: CertValidationMode::default(),
+                    network_code: "net".to_string(),
+                    device_id: "dev".to_string(),
+                    identity: shared_identity,
+                    ip: SharedNetworkAddr::default(),
+                    key_sign: None,
+                    ip_variable: false,
+                    allow_ikev2: false,
+                    allow_wireguard: false,
+                    default_interface: None,
+                    managed: None,
+                    client_instance_id: Arc::new(vec![1; 32]),
+                    wss_path,
+                    wss_headers: Vec::new(),
+                }
+                .to_connect_config()
+                .await
+                .unwrap()
+            }
+        };
+
+        // 显式 wss_path 覆盖地址自带路径
+        let configs = build("wss://Example.com:443/addr-path/", "/explicit/").await;
+        assert!(configs.iter().all(|c| c.wss_path == "/explicit/"));
+
+        // 无显式配置时用地址自带路径
+        let configs = build("wss://Example.com:443/addr-path/", "").await;
+        assert!(configs.iter().all(|c| c.wss_path == "/addr-path/"));
+
+        // 两者皆无时归一为空串（内核 build_wss_request 再归一为 "/"）
+        let configs = build("wss://Example.com:443", "").await;
+        assert!(configs.iter().all(|c| c.wss_path.is_empty()));
+
+        // 非 wss 协议：显式 wss_path 仍透传（仅 Wss 消费），地址无 path
+        let configs = build("tcp://Example.com:29872", "/explicit/").await;
+        assert!(configs.iter().all(|c| c.wss_path == "/explicit/"));
+    }
+
+    /// wss 附加 header 是反代寻址凭证（如 Cookie），Debug 打印必须
+    /// 对 value 全量打码、仅保留 name（review 发现的日志泄露修复）
+    #[test]
+    fn debug_redacts_wss_header_values() {
+        let config = ConnectConfig {
+            protocol_type: ProtocolType::Wss,
+            server_addr: "1.2.3.4:443".parse().unwrap(),
+            server_domain: "example.com".to_string(),
+            cert_mode: Default::default(),
+            default_interface: None,
+            wss_path: "/vnts/".to_string(),
+            wss_headers: vec![("Cookie".to_string(), "secret-credential".to_string())],
+        };
+        let printed = format!("{:?}", config);
+        assert!(!printed.contains("secret-credential"), "value must be redacted: {printed}");
+        assert!(printed.contains("Cookie"), "header name must stay visible");
+        assert!(printed.contains("REDACTED"));
     }
 }

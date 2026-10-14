@@ -146,18 +146,19 @@ fn build_wss_request(
         .context("Failed to build WebSocket request")?;
     {
         let request_headers = request.headers_mut();
-        // 用户自定义 header 先插入（可覆盖 Host 等）
+        // 用户自定义 header 用 append 写入：同名 header 保留多值（HTTP 合并语义，
+        // 服务端普遍按逗号连接），分两次写 Cookie 不会静默丢失
         for (name, value) in headers {
             let header_name = http::HeaderName::from_bytes(name.as_bytes())
                 .with_context(|| format!("Invalid header name: {name}"))?;
             let header_value = http::HeaderValue::from_str(value)
                 .with_context(|| format!("Invalid header value for header {name}"))?;
-            request_headers.insert(header_name, header_value);
+            request_headers.append(header_name, header_value);
         }
         // tungstenite generate_request 要求请求自带全部 WS 握手头
         // （IntoClientRequest for http::Request<()> 原样返回，不自动生成）；
-        // Host 用户可自定义（反代后端伪装场景），缺省取 URI authority，
-        // 其余四个强制写入保证握手有效
+        // 这四个头强制写入（覆盖用户值）保证握手有效；Host 用户可自定义
+        // （反代后端伪装场景），缺省取 URI authority
         let defaults = [
             (http::header::CONNECTION, "Upgrade".to_string()),
             (http::header::UPGRADE, "websocket".to_string()),
@@ -209,6 +210,24 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("x-cs-sandbox-id=abc; x-cs-sandbox-port=9000")
         );
+    }
+
+    /// 同名 header 用 append 保留多值（HTTP 合并语义）：
+    /// 分两次写 Cookie 不能静默覆盖（review 发现的回退风险）
+    #[test]
+    fn request_keeps_duplicate_header_names() {
+        let headers = vec![
+            ("Cookie".to_string(), "a=1".to_string()),
+            ("Cookie".to_string(), "b=2".to_string()),
+        ];
+        let request = build_wss_request("example.com", 443, "/", &headers).unwrap();
+        let cookies: Vec<&str> = request
+            .headers()
+            .get_all("cookie")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect();
+        assert_eq!(cookies, vec!["a=1", "b=2"]);
     }
 
     #[test]
