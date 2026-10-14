@@ -53,12 +53,16 @@ pub enum ProtocolType {
 pub struct ProtocolAddress {
     pub protocol_type: ProtocolType,
     pub address: String,
+    /// wss 地址自带的路径（`wss://host:port/path` 中的 path，含 query），
+    /// 作为 wss 握手路径的默认值；显式 wss_path 配置优先。其余协议恒为 None。
+    pub path: Option<String>,
 }
 impl Default for ProtocolAddress {
     fn default() -> Self {
         Self {
             protocol_type: ProtocolType::default(),
             address: "127.0.0.1:29872".to_string(),
+            path: None,
         }
     }
 }
@@ -67,9 +71,21 @@ impl FromStr for ProtocolAddress {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (protocol_type, server_addr) = parse_server(s)?;
+        // wss 地址支持 host:port/path 形式：路径剥离保存（穿越路径前缀反代），
+        // 其余协议不分割（地址中不该出现路径，出现也按 host 原样保留、由
+        // split_host_port/DNS 报错）
+        let (address, path) = if protocol_type == ProtocolType::Wss {
+            match server_addr.split_once('/') {
+                Some((host, path)) => (host.to_string(), Some(format!("/{path}"))),
+                None => (server_addr, None),
+            }
+        } else {
+            (server_addr, None)
+        };
         Ok(Self {
             protocol_type,
-            address: server_addr,
+            address,
+            path,
         })
     }
 }
@@ -81,7 +97,8 @@ impl fmt::Display for ProtocolAddress {
             ProtocolType::Wss => "wss://",
             ProtocolType::Dynamic => "dynamic://",
         };
-        write!(f, "{}{}", prefix, self.address)
+        let path = self.path.as_deref().unwrap_or("");
+        write!(f, "{}{}{}", prefix, self.address, path)
     }
 }
 pub fn parse_server(val: &str) -> Result<(ProtocolType, String), String> {
@@ -177,8 +194,21 @@ impl ConnectRegConfig {
             v => vec![(v, self.server_addr.address.to_string())],
         };
 
+        // 显式 wss_path 配置优先；否则用 wss 地址自带路径（parse 时保存，
+        // dynamic 发现的地址不支持路径）
+        let addr_wss_path = if self.server_addr.protocol_type == ProtocolType::Wss {
+            self.server_addr.path.clone()
+        } else {
+            None
+        };
+
         let mut connect_configs = Vec::new();
         for (protocol_type, server_domain) in server_domains {
+            let effective_wss_path = if self.wss_path.is_empty() {
+                addr_wss_path.clone().unwrap_or_default()
+            } else {
+                self.wss_path.clone()
+            };
             // DNS 只负责解析 IP，端口由调用方从地址中解析后自行拼装
             let (host, port) = match crate::utils::addr::split_host_port(&server_domain) {
                 Ok(v) => v,
@@ -206,7 +236,7 @@ impl ConnectRegConfig {
                 server_domain: host.to_owned(),
                 cert_mode: self.cert_mode.clone(),
                 default_interface: self.default_interface.clone(),
-                wss_path: self.wss_path.clone(),
+                wss_path: effective_wss_path.clone(),
                 wss_headers: self.wss_headers.clone(),
             }));
         }
@@ -360,5 +390,32 @@ mod tests {
             parse_server("TCP://Example.com:29872"),
             Ok((ProtocolType::TlsTcp, "Example.com:29872".to_string()))
         );
+    }
+
+    /// wss 地址支持 host:port/path 形式：路径剥离保存到 path 字段，
+    /// 作为 wss 握手路径的默认值（穿越路径前缀反代）；其余协议不分割。
+    /// Display 必须还原完整地址，保证配置序列化 roundtrip。
+    #[test]
+    fn parse_wss_address_extracts_path() {
+        let addr: ProtocolAddress = "wss://Example.com:443/vnts/".parse().unwrap();
+        assert_eq!(addr.address, "Example.com:443");
+        assert_eq!(addr.path.as_deref(), Some("/vnts/"));
+        assert_eq!(addr.to_string(), "wss://Example.com:443/vnts/");
+
+        let no_path: ProtocolAddress = "wss://Example.com:443".parse().unwrap();
+        assert_eq!(no_path.address, "Example.com:443");
+        assert_eq!(no_path.path, None);
+        assert_eq!(no_path.to_string(), "wss://Example.com:443");
+
+        // 非协议默认端口的路径同样剥离；query 一并保留在 path 中
+        let with_query: ProtocolAddress = "wss://Example.com:8443/gw?p=1".parse().unwrap();
+        assert_eq!(with_query.address, "Example.com:8443");
+        assert_eq!(with_query.path.as_deref(), Some("/gw?p=1"));
+        assert_eq!(with_query.to_string(), "wss://Example.com:8443/gw?p=1");
+
+        // 其余协议不分割路径（tcp/quic 地址无路径语义，host 部分原样保留）
+        let tcp: ProtocolAddress = "tcp://Example.com:29872".parse().unwrap();
+        assert_eq!(tcp.path, None);
+        assert_eq!(tcp.to_string(), "tcp://Example.com:29872");
     }
 }
