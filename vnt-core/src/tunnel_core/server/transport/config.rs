@@ -560,7 +560,10 @@ mod tests {
             wss_headers: vec![("Cookie".to_string(), "secret-credential".to_string())],
         };
         let printed = format!("{:?}", config);
-        assert!(!printed.contains("secret-credential"), "value must be redacted: {printed}");
+        assert!(
+            !printed.contains("secret-credential"),
+            "value must be redacted: {printed}"
+        );
         assert!(printed.contains("Cookie"), "header name must stay visible");
         assert!(printed.contains("REDACTED"));
     }
