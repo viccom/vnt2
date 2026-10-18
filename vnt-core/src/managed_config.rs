@@ -221,8 +221,10 @@ impl Subscription {
                 default_interface: None,
                 managed: None,
                 client_instance_id: std::sync::Arc::new(random_nonce()),
-                // 订阅协议 payload 暂无 header 位置，订阅链路本期不支持；
-                // 需要穿越 cookie 寻址反代时请用 --wss-path/--wss-header 静态配置
+                // 订阅链接 payload 无 header 位置，取配置/控制连接不带
+                // 附加 header（链接 server 地址内的子路径仍生效，transport
+                // 层以 URL 路径为默认值）；数据连接的 wss_path/wss_headers
+                // 由信封 TOML 下发（见 parse_envelope_config）
                 wss_path: String::new(),
                 wss_headers: Vec::new(),
             };
@@ -356,8 +358,8 @@ async fn run_subscription_connection(
         default_interface: None,
         managed: None,
         client_instance_id: Arc::new(random_nonce()),
-        // 订阅协议 payload 暂无 header 位置，订阅链路本期不支持；
-        // 需要穿越 cookie 寻址反代时请用 --wss-path/--wss-header 静态配置
+        // 同 fetch：链接 payload 无 header 位置，控制连接不带附加
+        // header，URL 内子路径经 transport 层默认值机制生效
         wss_path: String::new(),
         wss_headers: Vec::new(),
     };
@@ -537,6 +539,13 @@ fn parse_envelope_config(update: &SubscriptionConfigEnvelope) -> EnvelopeConfig 
         cert_mode: parse_typed(&table, "cert_mode").unwrap_or_default(),
         outbound_interface: parse_envelope_string(&table, "outbound_interface")
             .filter(|value| !value.is_empty()),
+        // wss 显式握手配置（穿越路径前缀/cookie 寻址网关，如单域名
+        // https/wss 云沙箱）：与 server 列表地址内路径的关系是显式值
+        // 优先、URL 路径为默认值（transport/config.rs）
+        wss_path: parse_envelope_string(&table, "wss_path")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default(),
+        wss_headers: parse_envelope_wss_headers(&table),
         tunnel_addr: parse_typed_list(&table, "tunnel_addr"),
         tunnel_port: parse_envelope_u16(&table, "tunnel_port"),
         device_mode: parse_typed(&table, "device_mode").unwrap_or_default(),
@@ -570,6 +579,25 @@ fn parse_typed_list<T: std::str::FromStr>(table: &toml::Table, key: &str) -> Vec
                 log::warn!("订阅信封中的 {key} '{value}' 无效");
                 None
             }
+        })
+        .collect()
+}
+
+/// 解析信封 TOML 的 wss_headers（"Name: Value" 字符串数组）为键值对。
+/// 非法条目（无冒号/空名/空值）逐项跳过并告警，与 parse_typed_list 的
+/// 宽松语义一致；键缺失时返回空，合并层保留本地配置。
+fn parse_envelope_wss_headers(table: &toml::Table) -> Vec<(String, String)> {
+    parse_envelope_string_list(table, "wss_headers")
+        .iter()
+        .filter_map(|entry| {
+            let (name, value) = entry.split_once(':')?;
+            let name = name.trim();
+            let value = value.trim();
+            if name.is_empty() || value.is_empty() {
+                log::warn!("订阅信封中的 wss_headers 条目 '{entry}' 无效，已跳过");
+                return None;
+            }
+            Some((name.to_string(), value.to_string()))
         })
         .collect()
 }
@@ -755,6 +783,50 @@ mod tests {
             source_server_id: "server".to_string(),
             content_sha256: Vec::new(),
         }
+    }
+
+    /// 订阅链路 wss://host[:port]/path 支持：信封 server 列表带子路径时
+    /// ProtocolAddress 保留路径（数据连接以 URL 路径为握手路径默认值，
+    /// 穿越 workbuddy 等单域名路径寻址网关）；显式 wss_path/wss_headers
+    /// 键出现且有效时进入 Config，覆盖逻辑见 merge_present_config
+    #[test]
+    fn envelope_toml_supports_wss_path_and_headers() {
+        let mut update = envelope(1);
+        update.toml = r#"
+server = ["wss://workbuddy.example.com/vnts/"]
+wss_path = "/gateway/vnts/"
+wss_headers = ["Cookie: a=1; b=2", "X-Extra: ok"]
+"#
+        .to_string();
+        let parsed = parse_envelope_config(&update);
+        let address = parsed.config.server_addr.first().unwrap();
+        assert_eq!(address.path.as_deref(), Some("/vnts/"));
+        assert_eq!(parsed.config.wss_path, "/gateway/vnts/");
+        assert_eq!(
+            parsed.config.wss_headers,
+            vec![
+                ("Cookie".to_string(), "a=1; b=2".to_string()),
+                ("X-Extra".to_string(), "ok".to_string())
+            ]
+        );
+        assert!(parsed.present.contains("wss_path"));
+        assert!(parsed.present.contains("wss_headers"));
+    }
+
+    /// 非法 header 条目跳过不致命（对齐 parse_typed_list 的逐项跳过语义）；
+    /// 键缺失时留空，由本地配置兜底
+    #[test]
+    fn envelope_wss_headers_skip_invalid_entries() {
+        let mut update = envelope(1);
+        update.toml = r#"
+wss_headers = ["Cookie: ok", "no-colon", ": empty-name", "X-Empty:  "]
+"#
+        .to_string();
+        let parsed = parse_envelope_config(&update);
+        assert_eq!(
+            parsed.config.wss_headers,
+            vec![("Cookie".to_string(), "ok".to_string())]
+        );
     }
 
     #[test]

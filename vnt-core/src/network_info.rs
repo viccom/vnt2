@@ -80,6 +80,14 @@ pub fn merge_present_config(
     overlay!("port_mapping", port_mapping);
     overlay!("subnet_mapping", subnet_mapping);
     overlay!("output", output);
+    // 订阅下发的 wss 显式配置（握手子路径/附加 header）：出现且非空才
+    // 覆盖——空值是解析失败兜底（等同未设置），不能清掉本地静态配置
+    if present.contains("wss_path") && !base.wss_path.is_empty() {
+        local.wss_path = base.wss_path.clone();
+    }
+    if present.contains("wss_headers") && !base.wss_headers.is_empty() {
+        local.wss_headers = base.wss_headers.clone();
+    }
     local
 }
 
@@ -634,5 +642,37 @@ mod merge_present_tests {
         ];
         let merged = merge_present_config(local, &base, &present(&[]));
         assert_eq!(merged.server_addr.len(), 2);
+    }
+
+    /// 订阅下发的 wss 显式配置（子路径/附加 header）只在信封出现且
+    /// 非空时覆盖本地——空值等同未设置（解析失败兜底语义），本地静态
+    /// 配置不被清空
+    #[test]
+    fn envelope_wss_fields_override_only_when_present_and_non_empty() {
+        let local = Config {
+            wss_path: "/local-path/".to_string(),
+            wss_headers: vec![("Cookie".to_string(), "local=1".to_string())],
+            ..Config::default()
+        };
+        // 信封未出现两键：本地保留
+        let merged = merge_present_config(local.clone(), &base_config(), &present(&[]));
+        assert_eq!(merged.wss_path, "/local-path/");
+        assert_eq!(merged.wss_headers.len(), 1);
+
+        // 出现且非空：覆盖本地（穿越 cookie 寻址网关的受管配置场景）
+        let mut base = base_config();
+        base.wss_path = "/managed-path/".to_string();
+        base.wss_headers = vec![("Cookie".to_string(), "managed=1".to_string())];
+        let merged =
+            merge_present_config(local.clone(), &base, &present(&["wss_path", "wss_headers"]));
+        assert_eq!(merged.wss_path, "/managed-path/");
+        assert_eq!(
+            merged.wss_headers,
+            vec![("Cookie".to_string(), "managed=1".to_string())]
+        );
+
+        // 出现但值为空（解析失败兜底）：等同未设置，本地保留
+        let merged = merge_present_config(local, &base_config(), &present(&["wss_path"]));
+        assert_eq!(merged.wss_path, "/local-path/");
     }
 }
