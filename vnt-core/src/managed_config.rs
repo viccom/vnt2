@@ -33,6 +33,11 @@ struct SubscriptionPayloadV2 {
     cert_mode: String,
     join_id: String,
     credential_key: String,
+    /// wss 取配置/控制连接的附加 header（"Name: Value" 数组）。v2 内
+    /// 可选演进：旧服务端不签发（客户端 serde default 为空），旧客户端
+    /// 忽略未知字段，双向兼容
+    #[serde(default)]
+    wss_headers: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -42,6 +47,9 @@ pub struct Subscription {
     /// 服务端签发的设备唯一订阅接入 ID。身份字段（network_code/device_id）
     /// 不在链接中，认证成功后由服务端信封下发。
     pub join_id: String,
+    /// 链接携带的 wss 附加 header（严格解析后的键值对），仅用于取配置/
+    /// 控制连接握手；数据连接的 header 由信封 TOML 下发
+    wss_headers: Vec<(String, String)>,
     credential_key: Vec<u8>,
     instance_id: Vec<u8>,
 }
@@ -135,6 +143,7 @@ impl std::fmt::Debug for Subscription {
             .field("server", &self.server)
             .field("cert_mode", &self.cert_mode)
             .field("join_id", &self.join_id)
+            .field("wss_headers", &"[REDACTED]")
             .field("credential_key", &"[REDACTED]")
             .finish()
     }
@@ -187,12 +196,58 @@ impl Subscription {
         ) {
             bail!("订阅链接不支持 dynamic:// 地址");
         }
+        // 链接是服务端签发物：header 条目严格解析，非法即在链接解析时报错
+        // （而非等到 wss 握手时失败）；条目格式与信封宽松解析共用
+        // parse_wss_header_entry
+        let wss_headers = payload
+            .wss_headers
+            .iter()
+            .map(|entry| {
+                parse_wss_header_entry(entry).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "订阅链接 wss_headers 条目 '{entry}' 无效（应为 \"Name: Value\"）"
+                    )
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(Self {
             server: payload.server,
             cert_mode: payload.cert_mode,
             join_id: payload.join_id,
+            wss_headers,
             credential_key,
             instance_id: random_nonce(),
+        })
+    }
+
+    /// 取配置与控制连接共用的 ConnectRegConfig 构造（join_id 兼作注册
+    /// 身份）。链接 header 透传用于握手；wss_path 留空——URL 内子路径
+    /// 经 transport 层默认值机制生效，不被链接层覆盖
+    fn connect_reg_config(
+        &self,
+        cert_mode: CertValidationMode,
+    ) -> anyhow::Result<ConnectRegConfig> {
+        Ok(ConnectRegConfig {
+            server_addr: ProtocolAddress::from_str(&self.server).map_err(anyhow::Error::msg)?,
+            cert_mode,
+            network_code: self.join_id.clone(),
+            device_id: self.join_id.clone(),
+            identity: SharedNodeIdentity::new(NodeIdentityTemplate {
+                name: self.join_id.clone(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                network_code: self.join_id.clone(),
+                advertised_subnets: Vec::new(),
+            }),
+            ip: crate::context::SharedNetworkAddr::default(),
+            key_sign: None,
+            ip_variable: true,
+            allow_ikev2: false,
+            allow_wireguard: false,
+            default_interface: None,
+            managed: None,
+            client_instance_id: std::sync::Arc::new(random_nonce()),
+            wss_path: String::new(),
+            wss_headers: self.wss_headers.clone(),
         })
     }
 
@@ -200,40 +255,11 @@ impl Subscription {
         let cert_mode =
             CertValidationMode::from_str(&self.cert_mode).map_err(anyhow::Error::msg)?;
         let mut last_error = None;
-        for endpoint in std::iter::once(&self.server) {
-            let server_addr = ProtocolAddress::from_str(endpoint).map_err(anyhow::Error::msg)?;
-            let resolver = ConnectRegConfig {
-                server_addr,
-                cert_mode: cert_mode.clone(),
-                network_code: self.join_id.clone(),
-                device_id: self.join_id.clone(),
-                identity: SharedNodeIdentity::new(NodeIdentityTemplate {
-                    name: self.join_id.clone(),
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    network_code: self.join_id.clone(),
-                    advertised_subnets: Vec::new(),
-                }),
-                ip: crate::context::SharedNetworkAddr::default(),
-                key_sign: None,
-                ip_variable: true,
-                allow_ikev2: false,
-                allow_wireguard: false,
-                default_interface: None,
-                managed: None,
-                client_instance_id: std::sync::Arc::new(random_nonce()),
-                // 订阅链接 payload 无 header 位置，取配置/控制连接不带
-                // 附加 header（链接 server 地址内的子路径仍生效，transport
-                // 层以 URL 路径为默认值）；数据连接的 wss_path/wss_headers
-                // 由信封 TOML 下发（见 parse_envelope_config）
-                wss_path: String::new(),
-                wss_headers: Vec::new(),
-            };
+        let resolver = self.connect_reg_config(cert_mode.clone())?;
+        {
             let configs = match resolver.to_connect_config().await {
                 Ok(value) => value,
-                Err(error) => {
-                    last_error = Some(error);
-                    continue;
-                }
+                Err(error) => return Err(error),
             };
             for config in configs {
                 let mut transport = TransportClient::new();
@@ -337,32 +363,7 @@ async fn run_subscription_connection(
 ) -> anyhow::Result<()> {
     let cert_mode =
         CertValidationMode::from_str(&subscription.cert_mode).map_err(anyhow::Error::msg)?;
-    let server_addr =
-        ProtocolAddress::from_str(&subscription.server).map_err(anyhow::Error::msg)?;
-    let resolver = ConnectRegConfig {
-        server_addr,
-        cert_mode,
-        network_code: subscription.join_id.clone(),
-        device_id: subscription.join_id.clone(),
-        identity: SharedNodeIdentity::new(NodeIdentityTemplate {
-            name: subscription.join_id.clone(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            network_code: subscription.join_id.clone(),
-            advertised_subnets: Vec::new(),
-        }),
-        ip: crate::context::SharedNetworkAddr::default(),
-        key_sign: None,
-        ip_variable: true,
-        allow_ikev2: false,
-        allow_wireguard: false,
-        default_interface: None,
-        managed: None,
-        client_instance_id: Arc::new(random_nonce()),
-        // 同 fetch：链接 payload 无 header 位置，控制连接不带附加
-        // header，URL 内子路径经 transport 层默认值机制生效
-        wss_path: String::new(),
-        wss_headers: Vec::new(),
-    };
+    let resolver = subscription.connect_reg_config(cert_mode)?;
     let configs = resolver.to_connect_config().await?;
     let mut last_error = None;
     for config in configs {
@@ -583,6 +584,18 @@ fn parse_typed_list<T: std::str::FromStr>(table: &toml::Table, key: &str) -> Vec
         .collect()
 }
 
+/// 解析单条 wss header（"Name: Value"）：冒号分割，名/值 trim 后均非空
+/// 才算合法。链接侧（严格：非法报错）与信封侧（宽松：非法跳过）共用。
+fn parse_wss_header_entry(entry: &str) -> Option<(String, String)> {
+    let (name, value) = entry.split_once(':')?;
+    let name = name.trim();
+    let value = value.trim();
+    if name.is_empty() || value.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), value.to_string()))
+}
+
 /// 解析信封 TOML 的 wss_headers（"Name: Value" 字符串数组）为键值对。
 /// 非法条目（无冒号/空名/空值）逐项跳过并告警，与 parse_typed_list 的
 /// 宽松语义一致；键缺失时返回空，合并层保留本地配置。
@@ -590,14 +603,10 @@ fn parse_envelope_wss_headers(table: &toml::Table) -> Vec<(String, String)> {
     parse_envelope_string_list(table, "wss_headers")
         .iter()
         .filter_map(|entry| {
-            let (name, value) = entry.split_once(':')?;
-            let name = name.trim();
-            let value = value.trim();
-            if name.is_empty() || value.is_empty() {
+            parse_wss_header_entry(entry).or_else(|| {
                 log::warn!("订阅信封中的 wss_headers 条目 '{entry}' 无效，已跳过");
-                return None;
-            }
-            Some((name.to_string(), value.to_string()))
+                None
+            })
         })
         .collect()
 }
@@ -829,6 +838,109 @@ wss_headers = ["Cookie: ok", "no-colon", ": empty-name", "X-Empty:  "]
         );
     }
 
+    /// 订阅链接可携带 wss_headers（穿越 cookie 寻址网关的取配置/控制连接）：
+    /// 条目严格解析（链接为签发物，非法条目在链接解析时报错而非握手时）；
+    /// 字段缺省（旧服务端链接，serde default）解析为空
+    #[test]
+    fn parses_v2_link_with_wss_headers() {
+        let payload = SubscriptionPayloadV2 {
+            v: 2,
+            server: "wss://workbuddy.example.com/vnts/".into(),
+            cert_mode: "standard".into(),
+            join_id: "11111111-2222-3333-4444-555555555555".into(),
+            credential_key: URL_SAFE_NO_PAD.encode([7_u8; 32]),
+            wss_headers: vec!["Cookie: a=1; b=2".into(), "X-Extra: ok".into()],
+        };
+        let link = format!(
+            "{SUBSCRIPTION_PREFIX}{}",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
+        );
+        let subscription = Subscription::parse(&link).unwrap();
+        assert_eq!(
+            subscription.wss_headers,
+            vec![
+                ("Cookie".to_string(), "a=1; b=2".to_string()),
+                ("X-Extra".to_string(), "ok".to_string())
+            ]
+        );
+
+        // 旧服务端链接（无该字段）照常解析，header 为空
+        let legacy = SubscriptionPayloadV2 {
+            wss_headers: Vec::new(),
+            ..payload
+        };
+        let link = format!(
+            "{SUBSCRIPTION_PREFIX}{}",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&legacy).unwrap())
+        );
+        assert!(Subscription::parse(&link).unwrap().wss_headers.is_empty());
+    }
+
+    #[test]
+    fn rejects_v2_link_with_invalid_wss_headers_entry() {
+        for bad in ["no-colon", ": empty-name", "X-Empty:  "] {
+            let payload = SubscriptionPayloadV2 {
+                v: 2,
+                server: "wss://127.0.0.1:29872".into(),
+                cert_mode: "standard".into(),
+                join_id: "11111111-2222-3333-4444-555555555555".into(),
+                credential_key: URL_SAFE_NO_PAD.encode([7_u8; 32]),
+                wss_headers: vec![bad.to_string()],
+            };
+            let link = format!(
+                "{SUBSCRIPTION_PREFIX}{}",
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
+            );
+            let error = Subscription::parse(&link).unwrap_err();
+            assert!(error.to_string().contains("wss_headers"), "{bad}: {error}");
+        }
+    }
+
+    /// 链接携带网关凭证（如 Cookie）后，Debug 输出不得泄露 header 值——
+    /// 与 credential_key 同级打码（对齐凭证日志打码先例）
+    #[test]
+    fn subscription_debug_redacts_wss_headers() {
+        let subscription = Subscription {
+            server: "wss://workbuddy.example.com/vnts/".to_string(),
+            cert_mode: "standard".to_string(),
+            join_id: "11111111-2222-3333-4444-555555555555".to_string(),
+            wss_headers: vec![("Cookie".to_string(), "secret-value".to_string())],
+            credential_key: vec![1_u8; 32],
+            instance_id: vec![2_u8; 32],
+        };
+        let printed = format!("{subscription:?}");
+        assert!(!printed.contains("secret-value"));
+        assert!(printed.contains("[REDACTED]"));
+    }
+
+    /// 取配置与控制连接共用 connect_reg_config 构造：链接 header 透传到
+    /// ConnectRegConfig；wss_path 保持空（URL 内子路径经 transport 层
+    /// 默认值机制生效，不被链接层覆盖）
+    #[test]
+    fn subscription_connect_reg_config_carries_headers() {
+        let subscription = Subscription {
+            server: "wss://workbuddy.example.com/vnts/".to_string(),
+            cert_mode: "standard".to_string(),
+            join_id: "11111111-2222-3333-4444-555555555555".to_string(),
+            wss_headers: vec![("Cookie".to_string(), "gw=1".to_string())],
+            credential_key: vec![1_u8; 32],
+            instance_id: vec![2_u8; 32],
+        };
+        let config = subscription
+            .connect_reg_config(CertValidationMode::Standard)
+            .unwrap();
+        assert_eq!(
+            config.wss_headers,
+            vec![("Cookie".to_string(), "gw=1".to_string())]
+        );
+        assert_eq!(config.wss_path, "");
+        assert_eq!(
+            config.server_addr.path.as_deref(),
+            Some("/vnts/"),
+            "URL 内子路径应保留为握手路径默认值"
+        );
+    }
+
     #[test]
     fn role_separated_proofs_bind_the_server_to_the_client_nonce() {
         let key = [7_u8; 32];
@@ -860,6 +972,7 @@ wss_headers = ["Cookie: ok", "no-colon", ": empty-name", "X-Empty:  "]
             cert_mode: "skip".into(),
             join_id: "11111111-2222-3333-4444-555555555555".into(),
             credential_key: URL_SAFE_NO_PAD.encode([0_u8; 32]),
+            wss_headers: Vec::new(),
         };
         let link = format!(
             "{SUBSCRIPTION_PREFIX}{}",
@@ -876,6 +989,7 @@ wss_headers = ["Cookie: ok", "no-colon", ": empty-name", "X-Empty:  "]
             cert_mode: "standard".into(),
             join_id: "11111111-2222-3333-4444-555555555555".into(),
             credential_key: URL_SAFE_NO_PAD.encode([0_u8; 32]),
+            wss_headers: Vec::new(),
         };
         let link = format!(
             "{SUBSCRIPTION_PREFIX}{}",
@@ -893,6 +1007,7 @@ wss_headers = ["Cookie: ok", "no-colon", ": empty-name", "X-Empty:  "]
             cert_mode: "standard".into(),
             join_id: "11111111-2222-3333-4444-555555555555".into(),
             credential_key: URL_SAFE_NO_PAD.encode([7_u8; 32]),
+            wss_headers: Vec::new(),
         };
         let link = format!(
             "{SUBSCRIPTION_PREFIX}{}",
