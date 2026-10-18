@@ -2836,34 +2836,17 @@ fn convert_config(cfg: StartConfig) -> anyhow::Result<CoreConfig> {
     })
 }
 
-/// 规范化 wss 握手路径：None/空串归一为 "/"（与内核语义一致）
+/// 规范化 wss 握手路径：空值表示未配置（与 CLI 一致，内核 build_wss_request
+/// 再归一为 "/"），非空必须以 / 开头且只含可见 ASCII。规则与 CLI/订阅链路
+/// 共用 vnt_core::utils::wss。
 fn parse_wss_path(raw: Option<&str>) -> anyhow::Result<String> {
-    let path = raw.unwrap_or("").trim();
-    if path.is_empty() {
-        return Ok("/".to_string());
-    }
-    if !path.starts_with('/') {
-        bail!("wss_path 必须以 / 开头，得到 {:?}", path);
-    }
-    Ok(path.to_string())
+    vnt_core::utils::wss::normalize_wss_path(raw)
 }
 
-/// 解析 "Name: Value" 形式的 wss 附加 header；缺冒号或名称为空即报错，
-/// 具体 header 名/值合法性由 wss 握手构建时二次校验
+/// 解析 "Name: Value" 形式的 wss 附加 header；规则与握手构建共用
+/// vnt_core::utils::wss（名/值 HTTP 合法性在此一并校验）
 fn parse_wss_headers(headers_raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
-    headers_raw
-        .iter()
-        .map(|value| {
-            let (name, header_value) = value
-                .split_once(':')
-                .ok_or_else(|| anyhow!("invalid wss header '{}': expected 'Name: Value'", value))?;
-            let name = name.trim();
-            if name.is_empty() {
-                return Err(anyhow!("invalid wss header '{}': empty header name", value));
-            }
-            Ok((name.to_string(), header_value.trim().to_string()))
-        })
-        .collect()
+    vnt_core::utils::wss::parse_wss_headers(headers_raw)
 }
 
 async fn shutdown_signal() -> anyhow::Result<()> {
@@ -3640,9 +3623,9 @@ ip = "10.26.0.2"
         config.wss_headers = vec![" : v".to_string()];
         assert!(convert_config(config).is_err());
 
-        // 未配置时归一为 "/"（与内核 build_wss_request 的空串语义一致）
+        // 未配置时保持空串（与 CLI 一致；内核 build_wss_request 归一为 "/"）
         let core = convert_config(new_test_config()).unwrap();
-        assert_eq!(core.wss_path, "/");
+        assert_eq!(core.wss_path, "");
         assert!(core.wss_headers.is_empty());
     }
 

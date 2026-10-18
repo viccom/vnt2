@@ -1510,6 +1510,9 @@ fn parse_config_from_json(json_str: &str, managed: bool) -> anyhow::Result<Confi
         tunnel_addr: cfg.tunnel_addr,
         tunnel_port: cfg.tunnel_port,
         event_script: cfg.event_script,
+        // Android 端经 JNI JSON 配置接入，不含 wss 传输选项
+        wss_path: String::new(),
+        wss_headers: Vec::new(),
         managed: None,
     };
     // 托管实例的身份只来自订阅信封（RuntimeChangeManager 合并时以信封为准），

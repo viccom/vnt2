@@ -97,10 +97,10 @@ fn main() {
     // `--flag` 打头（计划 §1 论断 2），故首个裸词即 CLI 子命令候选；
     // 带值 flag（--addr/--token/--conf/--desktop_config）的值须跳过，
     // 防 `--conf config` 之类值与白名单词相撞。
-    if let Some(subcommand) = first_bare_word() {
-        if CLI_SUBCOMMANDS.contains(&subcommand.as_str()) {
-            std::process::exit(run_cli_mode());
-        }
+    if let Some(subcommand) = first_bare_word()
+        && CLI_SUBCOMMANDS.contains(&subcommand.as_str())
+    {
+        std::process::exit(run_cli_mode());
     }
     if let Err(error) = run() {
         eprintln!("{error:#}");

@@ -187,8 +187,8 @@ impl FileConfig {
             Ok(Vec::new())
         }
     }
-    /// 解析 "Name: Value" 形式的 wss 附加 header；缺冒号或名称为空即报错，
-    /// 具体 header 名/值合法性由 wss 握手构建时二次校验
+    /// 解析 "Name: Value" 形式的 wss 附加 header；规则与握手构建共用
+    /// vnt_core::utils::wss（名/值 HTTP 合法性在此一并校验）
     pub fn to_wss_headers(&self) -> anyhow::Result<Vec<(String, String)>> {
         let Some(headers_raw) = &self.wss_headers else {
             return Ok(Vec::new());
@@ -198,22 +198,8 @@ impl FileConfig {
 }
 
 /// 解析 CLI/文件中的 "Name: Value" 形式的 wss 附加 header 列表。
-/// 这里只校验分隔符与名称非空；header 名/值的 HTTP 合法性
-/// （令牌字符、无控制字符）在 wss 握手构建时统一校验。
 fn parse_wss_header_args(headers_raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
-    headers_raw
-        .iter()
-        .map(|value| {
-            let (name, header_value) = value
-                .split_once(':')
-                .ok_or_else(|| anyhow!("invalid wss header '{}': expected 'Name: Value'", value))?;
-            let name = name.trim();
-            if name.is_empty() {
-                return Err(anyhow!("invalid wss header '{}': empty header name", value));
-            }
-            Ok((name.to_string(), header_value.trim().to_string()))
-        })
-        .collect()
+    vnt_core::utils::wss::parse_wss_headers(headers_raw)
 }
 
 #[derive(Parser, Debug, Clone)]

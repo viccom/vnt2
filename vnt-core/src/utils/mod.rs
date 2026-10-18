@@ -5,6 +5,7 @@ pub(crate) mod dns_query;
 pub(crate) mod http_get;
 pub(crate) mod socket;
 pub mod task_control;
+pub mod wss;
 pub(crate) mod time {
     pub fn now_ts_ms() -> i64 {
         std::time::SystemTime::now()

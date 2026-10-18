@@ -196,20 +196,10 @@ impl Subscription {
         ) {
             bail!("订阅链接不支持 dynamic:// 地址");
         }
-        // 链接是服务端签发物：header 条目严格解析，非法即在链接解析时报错
-        // （而非等到 wss 握手时失败）；条目格式与信封宽松解析共用
-        // parse_wss_header_entry
-        let wss_headers = payload
-            .wss_headers
-            .iter()
-            .map(|entry| {
-                parse_wss_header_entry(entry).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "订阅链接 wss_headers 条目 '{entry}' 无效（应为 \"Name: Value\"）"
-                    )
-                })
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        // 链接是服务端签发物：header 条目严格解析（与握手约束等价），
+        // 非法即在链接解析时报错而非等到 wss 握手时失败
+        let wss_headers = crate::utils::wss::parse_wss_headers(&payload.wss_headers)
+            .map_err(|error| anyhow::anyhow!("订阅链接 {error}"))?;
         Ok(Self {
             server: payload.server,
             cert_mode: payload.cert_mode,
@@ -584,31 +574,12 @@ fn parse_typed_list<T: std::str::FromStr>(table: &toml::Table, key: &str) -> Vec
         .collect()
 }
 
-/// 解析单条 wss header（"Name: Value"）：冒号分割，名/值 trim 后均非空
-/// 才算合法。链接侧（严格：非法报错）与信封侧（宽松：非法跳过）共用。
-fn parse_wss_header_entry(entry: &str) -> Option<(String, String)> {
-    let (name, value) = entry.split_once(':')?;
-    let name = name.trim();
-    let value = value.trim();
-    if name.is_empty() || value.is_empty() {
-        return None;
-    }
-    Some((name.to_string(), value.to_string()))
-}
-
 /// 解析信封 TOML 的 wss_headers（"Name: Value" 字符串数组）为键值对。
-/// 非法条目（无冒号/空名/空值）逐项跳过并告警，与 parse_typed_list 的
-/// 宽松语义一致；键缺失时返回空，合并层保留本地配置。
+/// 非法条目逐项跳过并告警（信封热更新不能因单条坏配置而失败），规则与
+/// 链接侧共用 utils::wss；键缺失时返回空，合并层保留本地配置。
 fn parse_envelope_wss_headers(table: &toml::Table) -> Vec<(String, String)> {
-    parse_envelope_string_list(table, "wss_headers")
-        .iter()
-        .filter_map(|entry| {
-            parse_wss_header_entry(entry).or_else(|| {
-                log::warn!("订阅信封中的 wss_headers 条目 '{entry}' 无效，已跳过");
-                None
-            })
-        })
-        .collect()
+    let entries = parse_envelope_string_list(table, "wss_headers");
+    crate::utils::wss::parse_wss_headers_lenient(&entries)
 }
 
 fn parse_envelope_string(table: &toml::Table, key: &str) -> Option<String> {
@@ -823,7 +794,7 @@ wss_headers = ["Cookie: a=1; b=2", "X-Extra: ok"]
     }
 
     /// 非法 header 条目跳过不致命（对齐 parse_typed_list 的逐项跳过语义）；
-    /// 键缺失时留空，由本地配置兜底
+    /// 键缺失时留空，由本地配置兜底。空值条目合法（HeaderValue 接受）。
     #[test]
     fn envelope_wss_headers_skip_invalid_entries() {
         let mut update = envelope(1);
@@ -834,7 +805,10 @@ wss_headers = ["Cookie: ok", "no-colon", ": empty-name", "X-Empty:  "]
         let parsed = parse_envelope_config(&update);
         assert_eq!(
             parsed.config.wss_headers,
-            vec![("Cookie".to_string(), "ok".to_string())]
+            vec![
+                ("Cookie".to_string(), "ok".to_string()),
+                ("X-Empty".to_string(), String::new()),
+            ]
         );
     }
 
@@ -878,7 +852,7 @@ wss_headers = ["Cookie: ok", "no-colon", ": empty-name", "X-Empty:  "]
 
     #[test]
     fn rejects_v2_link_with_invalid_wss_headers_entry() {
-        for bad in ["no-colon", ": empty-name", "X-Empty:  "] {
+        for bad in ["no-colon", ": empty-name"] {
             let payload = SubscriptionPayloadV2 {
                 v: 2,
                 server: "wss://127.0.0.1:29872".into(),
@@ -939,6 +913,30 @@ wss_headers = ["Cookie: ok", "no-colon", ": empty-name", "X-Empty:  "]
             Some("/vnts/"),
             "URL 内子路径应保留为握手路径默认值"
         );
+    }
+
+    /// 链接解析的 header 约束必须与握手构建等价：仅判非空会让坏条目
+    /// 通过链接解析、直到 wss 握手才失败（审查发现的不对称）
+    #[test]
+    fn link_parse_rejects_headers_that_would_fail_handshake() {
+        for bad in ["Bad Name: v", "X@Bad: v", "X-Ok: v\u{7f}", "X-Ok: v\nv"] {
+            let payload = SubscriptionPayloadV2 {
+                v: 2,
+                server: "wss://127.0.0.1:29872".into(),
+                cert_mode: "standard".into(),
+                join_id: "11111111-2222-3333-4444-555555555555".into(),
+                credential_key: URL_SAFE_NO_PAD.encode([7_u8; 32]),
+                wss_headers: vec![bad.to_string()],
+            };
+            let link = format!(
+                "{SUBSCRIPTION_PREFIX}{}",
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
+            );
+            assert!(
+                Subscription::parse(&link).is_err(),
+                "链接解析应拒绝握手会失败的条目: {bad:?}"
+            );
+        }
     }
 
     #[test]

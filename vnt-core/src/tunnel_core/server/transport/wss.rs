@@ -169,6 +169,15 @@ fn build_wss_request(
             ),
         ];
         for (name, value) in defaults {
+            // 这四个头是握手必需项，用户显式配置的同名值必须让位；
+            // 覆盖时告警，避免排障时误以为自定义头已生效
+            if request_headers.contains_key(&name) {
+                log::warn!(
+                    "wss header '{}' 被握手必需值 '{}' 覆盖（用户配置值不生效）",
+                    name,
+                    value
+                );
+            }
             let header_value = http::HeaderValue::from_str(&value).expect("static header value");
             request_headers.insert(name, header_value);
         }
