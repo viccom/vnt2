@@ -120,6 +120,10 @@ jobs:
     needs: build-android-jni
     runs-on: ubuntu-latest
     steps:
+      # gh release create 需要 git 上下文（当前仓库/分支），否则报 not a git repository
+      - name: Check out repository
+        uses: actions/checkout@v5
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -146,9 +150,10 @@ jobs:
           count=$(printf '%s\n' "$files" | grep -c .)
           echo "Publishing $count files to $TAG"
           test "$count" -eq 6
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" $files --clobber
+          if gh release view "$TAG" --repo viccom/vnt2 >/dev/null 2>&1; then
+            gh release upload "$TAG" $files --repo viccom/vnt2 --clobber
           else
-            gh release create "$TAG" $files --title "Enhanced JNI $TAG" \
+            gh release create "$TAG" $files --repo viccom/vnt2 \
+              --target enhanced --title "Enhanced JNI $TAG" \
               --notes "vnt-jni (.so + sha256) built from viccom/vnt2 enhanced branch for viccom/VntApp."
           fi
