@@ -1,0 +1,154 @@
+name: Build Android JNI (enhanced core)
+
+# 从本 fork（enhanced 分支）的 vnt-jni crate 编译 3 个 ABI 的 libvnt_jni.so，
+# 供 viccom/VntApp 的 Android 构建消费。基于官方 vnt rust.yml 的 build-android-jni job。
+# 产物：vnt-jni-<abi>-<tag>.so + .sha256，上传到同名 GitHub Release。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to create/overwrite (e.g. enhanced-2.0.11)'
+        required: true
+        default: 'enhanced-2.0.11'
+
+permissions:
+  contents: write
+
+jobs:
+  build-android-jni:
+    name: Build Android JNI (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            abi: arm64-v8a
+            clang: aarch64-linux-android24-clang
+            cargo_env: AARCH64_LINUX_ANDROID
+            cc_env: CC_aarch64_linux_android
+            ar_env: AR_aarch64_linux_android
+          - target: armv7-linux-androideabi
+            abi: armeabi-v7a
+            clang: armv7a-linux-androideabi24-clang
+            cargo_env: ARMV7_LINUX_ANDROIDEABI
+            cc_env: CC_armv7_linux_androideabi
+            ar_env: AR_armv7_linux_androideabi
+          - target: x86_64-linux-android
+            abi: x86_64
+            clang: x86_64-linux-android24-clang
+            cargo_env: X86_64_LINUX_ANDROID
+            cc_env: CC_x86_64_linux_android
+            ar_env: AR_x86_64_linux_android
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android NDK r27d
+        run: sdkmanager "ndk;27.3.13750724"
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: android-jni-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: android-jni-${{ matrix.target }}-
+
+      - name: Build vnt-jni
+        env:
+          TARGET: ${{ matrix.target }}
+          CLANG: ${{ matrix.clang }}
+          CARGO_ENV: ${{ matrix.cargo_env }}
+          CC_ENV: ${{ matrix.cc_env }}
+          AR_ENV: ${{ matrix.ar_env }}
+        run: |
+          set -euo pipefail
+          NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.3.13750724"
+          toolchain="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export PATH="$toolchain:$PATH"
+          export "CARGO_TARGET_${CARGO_ENV}_LINKER=$toolchain/$CLANG"
+          export "CARGO_TARGET_${CARGO_ENV}_RUSTFLAGS=-C link-arg=-Wl,-z,max-page-size=16384"
+          export "$CC_ENV=$toolchain/$CLANG"
+          export "$AR_ENV=$toolchain/llvm-ar"
+          cargo build --locked --release -p vnt-jni --target "$TARGET"
+
+      - name: Verify and package native library
+        env:
+          TARGET: ${{ matrix.target }}
+          ABI: ${{ matrix.abi }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.3.13750724"
+          library="target/$TARGET/release/libvnt_jni.so"
+          readelf="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          nm="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          test -s "$library"
+          "$nm" -D --defined-only "$library" | grep -q Java_com_vnt_VntManager_nativeInit
+          "$readelf" -l "$library" | awk '/ LOAD / { found=1; if ($NF != "0x4000") bad=1 } END { exit (!found || bad) }'
+          tag="${INPUT_TAG:-$REF_NAME}"
+          mkdir -p artifacts
+          asset="artifacts/vnt-jni-${ABI}-${tag}.so"
+          cp "$library" "$asset"
+          (cd artifacts && sha256sum "$(basename "$asset")" > "$(basename "$asset").sha256")
+
+      - name: Upload Android JNI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vnt-Android-${{ matrix.abi }}
+          path: artifacts/vnt-jni-${{ matrix.abi }}-*.so*
+          if-no-files-found: error
+
+  release:
+    name: Publish JNI libraries to Release
+    needs: build-android-jni
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Determine release tag
+        id: tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$REF_NAME}"
+          echo "value=$tag" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $tag"
+
+      - name: Publish via gh release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          set -euo pipefail
+          files=$(find ./artifacts -type f \( -name '*.so' -o -name '*.so.sha256' \) -print)
+          count=$(printf '%s\n' "$files" | grep -c .)
+          echo "Publishing $count files to $TAG"
+          test "$count" -eq 6
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" $files --clobber
+          else
+            gh release create "$TAG" $files --title "Enhanced JNI $TAG" \
+              --notes "vnt-jni (.so + sha256) built from viccom/vnt2 enhanced branch for viccom/VntApp."
+          fi
